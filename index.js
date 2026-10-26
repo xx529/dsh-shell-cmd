@@ -165,6 +165,71 @@ export function createShellCommandMessage(text, command) {
   }
 }
 
+/** 记录每个会话中「本插件写入的标题事件 seq」，用于区分自动标题 / 人工改名。 */
+const titledSessions = new WeakMap()
+
+/**
+ * 把命令整理成适合做会话标题的一行文本（标题服务还会做字节截断与清理）。
+ * @param {string} command 命令原文
+ * @returns {string}
+ */
+export function titleFromCommand(command) {
+  if (typeof command !== 'string') return ''
+  return command.replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * 用命令名命名当前会话。
+ *
+ * 规则（避免覆盖用户手动改的名字）：
+ * - 尚无标题：写入命令；
+ * - 标题来自自动生成（`fallback` / `provider`）：写入命令；
+ * - 标题是本插件之前写入的（按 `session/title` 事件 seq 判断）：更新为最新命令；
+ * - 标题是用户手动改的（`source.kind === 'user'` 且不是本插件写入）：保持不动。
+ *
+ * `sessionTitle.rename()` 会以 `source: 'user'` 固定标题，因此之后不会再被自动标题覆盖；
+ * 这正是 `/cmd` 作为会话第一动作时的期望。失败一律静默，不影响命令执行。
+ *
+ * @param {any} ctx 插件上下文
+ * @param {any} agent 接收命令的 Agent（需带 `session`）
+ * @param {string} command 命令原文
+ * @returns {boolean} 是否成功写入了标题
+ */
+export function syncSessionTitle(ctx, agent, command) {
+  let service
+  try {
+    service = typeof ctx?.get === 'function' ? ctx.get('sessionTitle') : undefined
+  } catch {
+    return false
+  }
+  if (service === undefined || service === null || typeof service.rename !== 'function') return false
+  const session = agent?.session
+  if (session === undefined || session === null) return false
+  const title = titleFromCommand(command)
+  if (title.length === 0) return false
+  let current
+  try {
+    current = typeof service.get === 'function' ? service.get(session) : undefined
+  } catch {
+    return false
+  }
+  const ourSeq = titledSessions.get(session)
+  if (current !== undefined && current !== null && current.source?.kind === 'user' && current.eventSeq !== ourSeq) {
+    // 人工命名过，尊重用户选择。
+    return false
+  }
+  try {
+    const snapshot = service.rename(session, title)
+    if (snapshot !== undefined && snapshot !== null && Number.isFinite(snapshot.eventSeq)) {
+      titledSessions.set(session, snapshot.eventSeq)
+    }
+    return true
+  } catch {
+    // 标题失败（例如超出字节上限被拒绝）不影响命令本身。
+    return false
+  }
+}
+
 /**
  * 执行一条命令并返回结果。
  * @param {any} ctx 插件上下文
@@ -205,6 +270,9 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
     typeof options.createMessage === 'function' ? options.createMessage : createShellCommandMessage
   const command = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
   if (command.length === 0) return { kind: 'error', text: USAGE }
+
+  // 用命令命名会话（在开始执行前就生效，侧边栏立即可见）。
+  syncSessionTitle(ctx, invocation.agent, command)
 
   let run
   try {

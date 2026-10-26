@@ -23,6 +23,8 @@ import {
   composeCommandText,
   composeModelText,
   createShellCommandMessage,
+  titleFromCommand,
+  syncSessionTitle,
   executeShellCommand,
   apply,
 } from '../index.js'
@@ -48,7 +50,7 @@ function makeResult(overrides = {}) {
  * 构造伪 ctx / agent / 可注入的消息工厂，并记录所有调用。
  * - state.result 可在测试中途替换，execute 每次读取最新值。
  */
-function makeHarness({ result = makeResult(), executeError = null, ensureResult = '/tmp/work' } = {}) {
+function makeHarness({ result = makeResult(), executeError = null, ensureResult = '/tmp/work', sessionTitle = null } = {}) {
   const state = { result, executeError }
   const resolveCalls = []
   const executeCalls = []
@@ -56,6 +58,7 @@ function makeHarness({ result = makeResult(), executeError = null, ensureResult 
   const ensureCalls = []
   const createdMessages = []
   const createMessageCalls = []
+  const session = { id: `session-${Math.random().toString(36).slice(2, 10)}` }
 
   const ctx = {
     workingDirectory: {
@@ -76,9 +79,11 @@ function makeHarness({ result = makeResult(), executeError = null, ensureResult 
         return { result: async () => state.result }
       },
     },
+    get: (name) => (name === 'sessionTitle' && sessionTitle !== null ? sessionTitle : undefined),
   }
 
   const agent = {
+    session,
     followup: (message) => {
       followups.push(message)
     },
@@ -101,6 +106,7 @@ function makeHarness({ result = makeResult(), executeError = null, ensureResult 
     state,
     ctx,
     agent,
+    session,
     resolveCalls,
     executeCalls,
     followups,
@@ -108,6 +114,42 @@ function makeHarness({ result = makeResult(), executeError = null, ensureResult 
     createdMessages,
     createMessageCalls,
     createMessage,
+  }
+}
+
+/**
+ * 构造伪 sessionTitle 服务（get / rename），记录调用并维护最新快照。
+ * @param {{ current?: object, renameThrows?: boolean, seqStart?: number }} [options]
+ */
+function makeTitleService({ current = undefined, renameThrows = false, seqStart = 10 } = {}) {
+  const calls = []
+  let state = current
+  let seq = seqStart
+  const service = {
+    get: () => state,
+    rename: (session, title) => {
+      calls.push({ session, title })
+      if (renameThrows) throw new Error('title rejected')
+      state = {
+        title,
+        messageSeqs: [],
+        source: { kind: 'user' },
+        eventSeq: seq,
+        updatedAt: Date.now(),
+      }
+      seq += 1
+      return state
+    },
+  }
+  return {
+    service,
+    calls,
+    get current() {
+      return state
+    },
+    setCurrent(value) {
+      state = value
+    },
   }
 }
 
@@ -617,6 +659,152 @@ describe('executeShellCommand', () => {
 
     assert.equal(h.resolveCalls.length, 1)
     assert.equal(h.resolveCalls[0].timeoutMs, 1234)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 会话标题
+// ---------------------------------------------------------------------------
+
+describe('titleFromCommand', () => {
+  it('把多行 / 连续空白折叠为一行并去掉首尾空白', () => {
+    assert.equal(titleFromCommand('  echo   hi  '), 'echo hi')
+    assert.equal(titleFromCommand('a\n  b\tc '), 'a b c')
+  })
+
+  it('非字符串返回空串', () => {
+    assert.equal(titleFromCommand(undefined), '')
+    assert.equal(titleFromCommand(null), '')
+    assert.equal(titleFromCommand(42), '')
+  })
+})
+
+describe('syncSessionTitle', () => {
+  it('会话尚无标题时用命令命名', () => {
+    const title = makeTitleService()
+    const h = makeHarness({ sessionTitle: title.service })
+
+    const written = syncSessionTitle(h.ctx, h.agent, '  echo   hi  ')
+
+    assert.equal(written, true)
+    assert.deepEqual(title.calls, [{ session: h.session, title: 'echo hi' }])
+    assert.equal(title.current.title, 'echo hi')
+    assert.equal(title.current.source.kind, 'user')
+  })
+
+  it('已有自动标题（provider/fallback）时覆盖为命令', () => {
+    const title = makeTitleService({
+      current: { title: 'auto title', messageSeqs: [], source: { kind: 'provider' }, eventSeq: 3, updatedAt: 1 },
+    })
+    const h = makeHarness({ sessionTitle: title.service })
+
+    const written = syncSessionTitle(h.ctx, h.agent, 'git status')
+
+    assert.equal(written, true)
+    assert.equal(title.calls.length, 1)
+    assert.equal(title.calls[0].title, 'git status')
+  })
+
+  it('人工命名的标题不覆盖', () => {
+    const title = makeTitleService({
+      current: { title: 'my session', messageSeqs: [], source: { kind: 'user' }, eventSeq: 7, updatedAt: 1 },
+    })
+    const h = makeHarness({ sessionTitle: title.service })
+
+    const written = syncSessionTitle(h.ctx, h.agent, 'echo hi')
+
+    assert.equal(written, false)
+    assert.equal(title.calls.length, 0)
+  })
+
+  it('本插件写入过标题时会随最新命令更新', () => {
+    const title = makeTitleService()
+    const h = makeHarness({ sessionTitle: title.service })
+
+    assert.equal(syncSessionTitle(h.ctx, h.agent, 'first cmd'), true)
+    assert.equal(syncSessionTitle(h.ctx, h.agent, 'second cmd'), true)
+
+    assert.equal(title.calls.length, 2)
+    assert.equal(title.calls[1].title, 'second cmd')
+    assert.equal(title.current.title, 'second cmd')
+  })
+
+  it('本插件写入后若用户手动改名，则之后不再覆盖', () => {
+    const title = makeTitleService()
+    const h = makeHarness({ sessionTitle: title.service })
+    assert.equal(syncSessionTitle(h.ctx, h.agent, 'first cmd'), true)
+
+    // 模拟用户随后手动改名（source 仍是 user，但 eventSeq 变了）。
+    title.setCurrent({
+      title: 'manual title',
+      messageSeqs: [],
+      source: { kind: 'user' },
+      eventSeq: 99,
+      updatedAt: 2,
+    })
+
+    const written = syncSessionTitle(h.ctx, h.agent, 'later cmd')
+    assert.equal(written, false)
+    assert.equal(title.calls.length, 1)
+  })
+
+  it('缺少 sessionTitle 服务 / session / rename 能力时安全跳过', () => {
+    const noService = makeHarness({ sessionTitle: null })
+    assert.equal(syncSessionTitle(noService.ctx, noService.agent, 'echo hi'), false)
+
+    const withoutGet = makeHarness()
+    assert.equal(syncSessionTitle({ shell: {} }, withoutGet.agent, 'echo hi'), false)
+
+    const noSession = makeHarness({ sessionTitle: makeTitleService().service })
+    assert.equal(syncSessionTitle(noSession.ctx, { followup() {} }, 'echo hi'), false)
+  })
+
+  it('rename 抛错时返回 false 且不抛出', () => {
+    const title = makeTitleService({ renameThrows: true })
+    const h = makeHarness({ sessionTitle: title.service })
+
+    assert.equal(syncSessionTitle(h.ctx, h.agent, 'echo hi'), false)
+    assert.equal(title.calls.length, 1)
+  })
+})
+
+describe('executeShellCommand 与会话标题', () => {
+  it('执行前用修剪后的命令命名会话，并照常 followup', async () => {
+    const title = makeTitleService()
+    const h = makeHarness({
+      sessionTitle: title.service,
+      result: makeResult({ exitCode: 0, stdout: { text: 'hello', truncated: false } }),
+    })
+
+    const out = await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: '  echo hi  ', signal: undefined },
+      { createMessage: h.createMessage },
+    )
+
+    assert.equal(out.kind, 'success')
+    assert.equal(title.calls.length, 1)
+    assert.equal(title.calls[0].session, h.session)
+    assert.equal(title.calls[0].title, 'echo hi')
+    assert.equal(h.followups.length, 1)
+  })
+
+  it('命名失败（rename 抛错）不影响命令执行与模型消息', async () => {
+    const title = makeTitleService({ renameThrows: true })
+    const h = makeHarness({
+      sessionTitle: title.service,
+      result: makeResult({ exitCode: 0, stdout: { text: 'ok', truncated: false } }),
+    })
+
+    const out = await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: 'echo ok', signal: undefined },
+      { createMessage: h.createMessage },
+    )
+
+    assert.equal(out.kind, 'success')
+    assert.equal(out.text, 'ok')
+    assert.equal(h.followups.length, 1)
   })
 })
 
