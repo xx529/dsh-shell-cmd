@@ -87,6 +87,33 @@ plugin_manager action=install_bundle target=/Users/lzx/Documents/GitHub/dsh-shel
 
 Host 行 / Client 半端分别是 `index.js` 与 `client.js`，由 `package.json` 的 `dsh.bundle.patch` 与 `dsh.client` 声明。
 
+### 从 Git 仓库安装 / 发布（可复用）
+
+开发时用上面的本地链接安装；需要“推送仓库、并从 GitHub 仓库重装到当前 profile”时用脚本：
+
+```bash
+scripts/publish-install.sh              # 提交 + push + 用当前 commit 的 GitHub 归档安装 + 校验
+scripts/publish-install.sh --dry-run    # 只打印计划
+scripts/publish-install.sh --no-push    # 不推送（该 commit 必须已在远端）
+scripts/publish-install.sh --profile web --mode git
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--profile <name>` | 目标 profile，默认 `$DSH_PROFILE`，否则 `desktop` |
+| `--message <msg>` | 自动提交的提交信息 |
+| `--mode tarball\|git` | 安装源形式：GitHub 归档 URL（默认）或 `github:owner/repo#sha` |
+| `--spec <spec>` | 直接指定交给 `dsh plugin add` 的 spec（私有仓库/自定义源） |
+| `--no-push` / `--no-commit` / `--dry-run` | 跳过推送 / 跳过自动提交 / 只打印 |
+
+脚本通过官方 CLI 安装，CLI 会把声明了 `dsh.bundle` 的包自动写入 `dsh.profile.bundles`：
+
+```bash
+dsh plugin --profile "$DSH_PROFILE" add "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>"
+```
+
+前置条件：仓库已配置 `origin`；默认源要求仓库**公开**（匿名 tarball），私有仓库用 `--spec` 传带凭据的 git spec；`dsh` CLI 在 `PATH` 上。安装后 Host 模块需在插件页拨动开关或重启 DSH 才生效；只改 `client.js` 时刷新页面即可。
+
 ## 架构
 
 ```
