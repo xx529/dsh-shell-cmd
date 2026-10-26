@@ -70,6 +70,12 @@ usage() {
 环境变量:
   DSH_PROFILE / DSH_PROFILE_DIR / DSH_HOME   由 dsh 注入；脚本也会使用它们
   DSH_PLUGIN_SPEC                            等价于 --spec
+  DSH_PNPM                                   指定 pnpm 可执行文件
+
+说明:
+  安装由 dsh CLI 调用 pnpm 完成。脚本会优先使用 DSH_PNPM，其次 macOS Desktop
+  内置的 runtime pnpm（与 profile 管理器同版本，避免重解析整个 lockfile），
+  最后回退到 PATH 上的 pnpm。
 
 示例:
   scripts/publish-install.sh
@@ -223,6 +229,44 @@ else
   PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
 fi
 
+# ---------------------------------------------------------------------------
+# 选择 pnpm：dsh plugin 会调用 PATH 上的 pnpm。优先使用与管理该 profile
+# 相同版本的 pnpm（macOS Desktop 内置 runtime），避免不同 pnpm 版本重解析整个
+# lockfile（那会去拉取与本插件无关的依赖，且可能受网络限制影响）。
+# ---------------------------------------------------------------------------
+
+SHIM_DIR=""
+cleanup_shim() {
+  if [ -n "$SHIM_DIR" ]; then rm -rf "$SHIM_DIR"; fi
+}
+trap cleanup_shim EXIT
+
+PNPM_BIN="${DSH_PNPM:-}"
+if [ -z "$PNPM_BIN" ]; then
+  for runtime_pnpm in \
+    "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs" \
+    "$HOME/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs"; do
+    if [ -f "$runtime_pnpm" ]; then
+      SHIM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dsc-pnpm-XXXXXX")"
+      {
+        printf '#!/bin/sh\n'
+        printf 'exec node "%s" "$@"\n' "$runtime_pnpm"
+      } >"$SHIM_DIR/pnpm"
+      chmod +x "$SHIM_DIR/pnpm"
+      PNPM_BIN="$SHIM_DIR/pnpm"
+      break
+    fi
+  done
+fi
+
+if [ -n "$PNPM_BIN" ]; then
+  PATH="$(dirname "$PNPM_BIN"):$PATH"
+  export PATH
+  note "pnpm    : $("$PNPM_BIN" --version 2>/dev/null || echo unknown) ($PNPM_BIN)"
+else
+  note "pnpm    : $(pnpm --version 2>/dev/null || echo '未找到')"
+fi
+
 note ""
 note "package : $NAME@$VERSION"
 note "commit  : $SHA"
@@ -234,7 +278,8 @@ note ""
 # 4. 安装
 # ---------------------------------------------------------------------------
 
-run dsh plugin --profile "$PROFILE" add "$SPEC"
+# --prefer-offline: 已缓存元数据不再做 staleness 校验，加快安装并减少网络依赖。
+run dsh plugin --profile "$PROFILE" add --prefer-offline "$SPEC"
 
 if [ "$DRY_RUN" = 1 ]; then
   note ""
@@ -268,7 +313,10 @@ const bundles = manifest.dsh?.profile?.bundles ?? []
 const packageDir = path.join(profileDir, 'node_modules', name)
 const installedManifestPath = path.join(packageDir, 'package.json')
 
-if (dependency !== spec) {
+/** pnpm 会把本地 tarball spec 记成 `file:<path>`；比较时去掉协议前缀。 */
+const normalizeSpec = (value) => String(value ?? '').replace(/^file:/, '')
+
+if (normalizeSpec(dependency) !== normalizeSpec(spec)) {
   problems.push(`dependencies["${name}"] = ${JSON.stringify(dependency)}，期望 ${JSON.stringify(spec)}`)
 }
 if (!bundles.includes(name)) {

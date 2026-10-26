@@ -109,10 +109,10 @@ scripts/publish-install.sh --profile web --mode git
 脚本通过官方 CLI 安装，CLI 会把声明了 `dsh.bundle` 的包自动写入 `dsh.profile.bundles`：
 
 ```bash
-dsh plugin --profile "$DSH_PROFILE" add "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>"
+dsh plugin --profile "$DSH_PROFILE" add --prefer-offline "https://codeload.github.com/<owner>/<repo>/tar.gz/<sha>"
 ```
 
-前置条件：仓库已配置 `origin`；默认源要求仓库**公开**（匿名 tarball），私有仓库用 `--spec` 传带凭据的 git spec；`dsh` CLI 在 `PATH` 上。安装后 Host 模块需在插件页拨动开关或重启 DSH 才生效；只改 `client.js` 时刷新页面即可。
+macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管理器同版本，避免重解析整个 lockfile）；可用 `DSH_PNPM` 覆盖。前置条件：仓库已配置 `origin`；默认源要求仓库**公开**（匿名 tarball），私有仓库用 `--spec` 传带凭据的 git spec；`dsh` CLI 在 `PATH` 上。安装后 Host 模块需在插件页拨动开关或重启 DSH 才生效；只改 `client.js` 时刷新页面即可。
 
 ## 架构
 

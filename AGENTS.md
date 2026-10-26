@@ -119,9 +119,12 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 注意：
 
 - 仓库必须是**公开**的（默认走匿名 tarball）；私有仓库用 `--spec "github:<owner>/<repo>#<sha>"` 或带凭据的 URL。
+- 安装由 `dsh plugin` 调用 pnpm 完成。脚本优先用 `DSH_PNPM`，其次 macOS Desktop 内置 runtime pnpm（与 profile 管理器同版本，避免重解析整个 lockfile），最后回退 PATH 上的 pnpm。
 - git 传输被网络策略挡住时（例如受限沙箱）tarball 通道可能仍可用（`codeload.github.com` 与 `api.github.com` 走 HTTPS）。
+- 受限网络下 `pnpm add` 会去重新解析 profile 里**与本插件无关**的 GitHub 依赖（例如 `dsh-to-figma` 的 release tarball），可能卡住/失败；这不是脚本或插件的问题。换正常网络执行，或先 `--dry-run` 检查。
 - 安装后 Host 模块需要重载才生效（插件页拨动开关或重启 DSH）；Client 改动另需刷新页面。
 - 本地链接安装（`plugin_manager install_bundle` 指向工作区）只用于开发迭代；发布/换机用脚本。两者二选一，脚本会把 `link:` 改成 tarball/git spec。
+- 发布后如果希望恢复“改代码立即生效”的开发体验，重新做一次本地链接安装即可。
 
 ## 8. 排错
 
