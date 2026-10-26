@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Shell Command (/cmd)",
+    "description": "Type /cmd <command> in the composer: DSH runs the command first, sends the command and its output to the model, and renders this input as a terminal card in the conversation."
+  }
+}

@@ -1,0 +1,15 @@
+# dsh-shell-cmd · bundle patch layer
+#
+# 一行 Host 插件：包根 index.js 是 Host 半端（ESM：export { name, inject, apply, Config }）。
+# 浏览器半端由 package.json 的 dsh.client 声明提供（./client → client.js），
+# 由宿主模块系统按需 materialize，无需在此声明。
+#
+# 可选配置（取消注释后生效）：
+#   timeoutMs: 单条命令超时毫秒数，默认 120000
+#   maxOutputChars: 命令文本（卡片与模型共用）保留的最大字符数，默认 24000
+- insert:
+    - id: shell-cmd
+      name: dsh-shell-cmd
+      # config:
+      #   timeoutMs: 120000
+      #   maxOutputChars: 24000

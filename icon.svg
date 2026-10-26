@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Shell command /cmd">
+  <defs>
+    <linearGradient id="dsc-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22303c"/>
+      <stop offset="1" stop-color="#12181d"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#dsc-bg)"/>
+  <rect x="12" y="16" width="40" height="32" rx="6" fill="none" stroke="#3f5566" stroke-width="2.4"/>
+  <path d="M12 24h40" stroke="#3f5566" stroke-width="2.4"/>
+  <circle cx="18" cy="20" r="1.7" fill="#7ee097"/>
+  <circle cx="24" cy="20" r="1.7" fill="#f5c26b"/>
+  <circle cx="30" cy="20" r="1.7" fill="#ef7d7d"/>
+  <path d="M20 32l5 4-5 4" fill="none" stroke="#7ee097" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M29 40h9" stroke="#e8eef3" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M46 13L54 5" stroke="#7ee097" stroke-width="3.4" stroke-linecap="round"/>
+</svg>
