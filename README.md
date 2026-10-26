@@ -20,7 +20,9 @@ DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**�
 ```
 
 - 命令卡片：等宽字体、`$` 提示符、状态胶囊（执行中 / 退出码 / 超时 / 取消）、可展开的长输出、复制按钮。
+- 输入提示：输入框草稿进入 `/cmd` 模式时，下方出现「终端命令模式」提示条。
 - 模型输入：一条 user 消息，正文包含「用户手动执行了此命令」、命令原文、cwd、退出状态与 stdout/stderr。
+- 会话标题：执行 `/cmd` 时自动用**命令本身**命名当前会话（例如侧边栏从「未命名」变成 `git status --short`）。
 - 历史回放：卡片从 `command/run` + `command/done` 折叠出的 `CommandNode` 重建，重开会话/刷新后仍在。
 
 ## 使用
@@ -48,6 +50,20 @@ DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**�
 | 输出过长 | 单流最多读取 256 KiB；卡片与模型文本各自截断到 24k 字符并标注省略量 |
 | 会话正在运行 | 命令照常执行；命令消息经 `agent.followup()` 排队，等当前轮次结束再送达 |
 | 取消 | 命令执行绑定 UI 请求的取消信号；被取消时不向模型发送任何内容 |
+| 会话标题 | 执行前用命令命名当前会话（见下节） |
+
+### 会话标题规则
+
+`/cmd` 通过 `ctx.sessionTitle.rename(session, 命令)` 显式命名会话（`source: 'user'`，会固定标题，之后自动标题不再覆盖）：
+
+| 当前标题状态 | `/cmd` 的行为 |
+| --- | --- |
+| 还没有标题（新会话、侧边栏「未命名」） | 写入命令本身 |
+| 自动生成的标题（`fallback` / `provider`） | 覆盖为命令 |
+| 本插件之前写入的标题 | 更新为最新一次命令 |
+| 用户手动改过的标题（`source: 'user'` 且不是本插件写的） | **保持不动**，尊重用户命名 |
+
+命令会先做一行化处理（换行/连续空白折叠为单个空格），最终长度由标题服务的 `maxTitleBytes` 截断。标题失败（例如被服务拒绝）不影响命令执行。若不需要这个行为，在行配置里加 `nameSession: false`。
 
 ### 安全说明
 
@@ -78,11 +94,12 @@ Host 行 / Client 半端分别是 `index.js` 与 `client.js`，由 `package.json
         │
         ▼
 [Host] commands 服务解析并调用 handler
+        │  0. ctx.sessionTitle.rename(session, 命令)          ← 侧边栏会话名立即更新
         │  1. ctx.shell.resolve / execute（cwd=会话工作目录，前台等待，带超时与取消）
         │  2. 组装正文：stdout + [stderr] + 状态标记
-        │  3. agent.followup(user 消息：命令 + cwd + exit + 输出)  ← 模型据此回复
+        │  3. agent.followup(user 消息：命令 + cwd + exit + 输出) ← 模型据此回复
         ▼
-[会话日志] command/run + command/done（log-only，不进模型历史）
+[会话日志] session/title + command/run + command/done（均 log-only，不进模型历史）
         │
         ▼
 [Client] conversation.chat.commandview，key = "cmd"  →  终端卡片
@@ -90,7 +107,7 @@ Host 行 / Client 半端分别是 `index.js` 与 `client.js`，由 `package.json
 
 关键契约：
 
-- Host 半端导出 `{ name, inject, apply }`，`inject = ['commands', 'shell', 'workingDirectory']`；缺失任一服务时插件保持 inactive 而不是抛错。
+- Host 半端导出 `{ name, inject, apply }`，`inject = ['commands', 'shell', 'workingDirectory']`；缺失任一服务时插件保持 inactive 而不是抛错。`sessionTitle` 为可选服务（`ctx.get`），缺失时只跳过命名。
 - **不静态 import 任何 `@deepseek-ai/*` 核心包**：本地链接安装的插件在工作区内无法解析 dsh 安装内的包。UserMessage 按 `createUserMessage()` 的等价结构就地构造（`id` / `role` / `content` / `source`）。
 - Client 半端是 `window.__ModuleLoader__` 的懒工厂 classic script，只能 `require('react')`，无 JSX；样式经 `<style data-plugin-css>` 注入并在 `ctx.effect` 中清理。
 - 卡片注册在 `conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点），不替换任何内置渲染器。
@@ -112,7 +129,7 @@ exit: 0
 
 消息 `source.kind = "shell-command"`。UI 上它表现为一条**默认折叠**的“Execution requested”turn-trigger 通知，正文只在用户主动展开时显示——可见的输入表达始终是上方的终端卡片。
 
-## 可调常量
+## 可调常量与行配置
 
 `index.js` 顶部导出：
 
@@ -122,13 +139,13 @@ exit: 0
 | `DEFAULT_MAX_OUTPUT_CHARS` | `24000` | 卡片与模型文本各自保留的最大字符数 |
 | `STDOUT_MAX_BYTES` | `262144` | 执行器侧单流读取上限 |
 
-当前版本未导出 `Config`（避免依赖 schemastery）；`apply(ctx, config)` 仍会读取行配置中的 `timeoutMs` / `maxOutputChars`（若 Loader 透传）。
+当前版本未导出 `Config`（避免依赖 schemastery）；`apply(ctx, config)` 仍会读取行配置中的 `timeoutMs` / `maxOutputChars` / `nameSession`（若 Loader 透传）。
 
 ## 开发与验证
 
 ```bash
 npm run check   # node --check index.js && node --check client.js
-npm test        # node --test tests/  （Host 半端纯函数与执行路径单测）
+npm test        # node --test "tests/**/*.test.mjs"  （Host 半端纯函数、执行路径与会话标题单测）
 npm run verify  # check + test
 ```
 
@@ -136,6 +153,7 @@ npm run verify  # check + test
 
 - 卡片渲染只在 **Web / Desktop 的 Chat 视图**生效；纯文本入口（CLI、ACP、JSON-RPC）没有 slash 命令表面，也就没有 `/cmd`。
 - 会话全空的“新会话”在第一条命令时可能先记录 `command/run` 再激活会话；卡片随会话激活出现（与内置命令行一致）。
+- 会话标题一旦由 `/cmd` 写入即为显式标题（user pin），之后不会再被自动标题改写；不想要这个行为时用 `nameSession: false`。
 - 输出上限是为了保护会话日志与模型上下文；需要完整输出时请改用重定向到文件再 `/cmd cat <file>`。
 - 不提供 shell 持久化：每次 `/cmd` 都是独立的 `bash -c` 会话，`cd` 不会跨调用保留。
 

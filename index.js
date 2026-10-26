@@ -257,7 +257,7 @@ export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_
  * `/cmd` 的处理逻辑（与注册分离，便于测试）。
  * @param {any} ctx 插件上下文
  * @param {{ agent: any, rawInput: string, signal: AbortSignal }} invocation 命令调用
- * @param {{ timeoutMs?: number, maxOutputChars?: number, createMessage?: (text: string, command: string) => any }} [options]
+ * @param {{ timeoutMs?: number, maxOutputChars?: number, nameSession?: boolean, createMessage?: (text: string, command: string) => any }} [options]
  * @returns {Promise<{ kind: 'success' | 'error', text: string }>}
  */
 export async function executeShellCommand(ctx, invocation, options = {}) {
@@ -272,7 +272,7 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
   if (command.length === 0) return { kind: 'error', text: USAGE }
 
   // 用命令命名会话（在开始执行前就生效，侧边栏立即可见）。
-  syncSessionTitle(ctx, invocation.agent, command)
+  if (options.nameSession !== false) syncSessionTitle(ctx, invocation.agent, command)
 
   let run
   try {
@@ -305,12 +305,13 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
 /**
  * 注册 `/cmd`。
  * @param {any} ctx 插件上下文
- * @param {any} [config] 行配置（可选 timeoutMs / maxOutputChars）
+ * @param {any} [config] 行配置（可选 timeoutMs / maxOutputChars / nameSession）
  */
 export function apply(ctx, config = {}) {
   const options = {
     ...(Number.isFinite(config?.timeoutMs) ? { timeoutMs: config.timeoutMs } : {}),
     ...(Number.isFinite(config?.maxOutputChars) ? { maxOutputChars: config.maxOutputChars } : {}),
+    ...(config?.nameSession === false ? { nameSession: false } : {}),
   }
   ctx.commands.register({
     name: 'cmd',

@@ -789,6 +789,24 @@ describe('executeShellCommand 与会话标题', () => {
     assert.equal(h.followups.length, 1)
   })
 
+  it('nameSession=false 时只执行命令、不改会话标题', async () => {
+    const title = makeTitleService()
+    const h = makeHarness({
+      sessionTitle: title.service,
+      result: makeResult({ exitCode: 0, stdout: { text: 'ok', truncated: false } }),
+    })
+
+    const out = await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: 'echo ok', signal: undefined },
+      { nameSession: false, createMessage: h.createMessage },
+    )
+
+    assert.equal(out.kind, 'success')
+    assert.equal(title.calls.length, 0)
+    assert.equal(h.followups.length, 1)
+  })
+
   it('命名失败（rename 抛错）不影响命令执行与模型消息', async () => {
     const title = makeTitleService({ renameThrows: true })
     const h = makeHarness({
