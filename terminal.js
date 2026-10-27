@@ -566,3 +566,33 @@ export function createTerminalRpcResponder(registry) {
     return dispatch(registry, method, paramsOf(body.params))
   }
 }
+
+/**
+ * 创建挂到 `ctx.connection.fetch` 的 `/api` 精确路由（path 为 `cmd-terminal/rpc`）。
+ * 浏览器半端用相对地址 `api/cmd-terminal/rpc` 调用；Desktop 的 dsh-app 页面会把它
+ * 代理到 Host 的共享 `/api` 桥，天然带认证且不受页面 origin 限制。
+ *
+ * @param {any} registry `createTerminalRegistry()` 的返回值
+ * @returns {(request: Request) => Promise<Response>}
+ */
+export function createTerminalFetchRoute(registry) {
+  return async function terminalFetchRoute(request) {
+    let body = null
+    try {
+      body = await request.json()
+    } catch {
+      body = null
+    }
+    const box = paramsOf(body)
+    const method = typeof box.method === 'string' ? box.method : ''
+    if (method.length === 0) {
+      return Response.json(fail('bad-request', 'method is required'), {
+        status: 400,
+        headers: { 'cache-control': 'no-store' },
+      })
+    }
+    const result = await dispatch(registry, method, paramsOf(box.params))
+    const status = result.ok === true ? 200 : (STATUS_BY_CODE[result.error?.code] ?? 500)
+    return Response.json(result, { status, headers: { 'cache-control': 'no-store' } })
+  }
+}

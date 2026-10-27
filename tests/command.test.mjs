@@ -519,7 +519,7 @@ describe('executeShellCommand', () => {
     const opened = []
     const h = makeHarness({
       webServer: { register: (route) => (routes.push(route), () => {}) },
-      connection: { requestRejection: () => undefined, rpc: { intercept: () => () => {} } },
+      connection: { requestRejection: () => undefined, fetch: { register: () => () => {} } },
       agents: { get: () => undefined },
     })
 
@@ -545,13 +545,13 @@ describe('executeShellCommand', () => {
 
     const missingAgents = makeHarness({
       webServer: { register: () => () => {} },
-      connection: { requestRejection: () => undefined, rpc: { intercept: () => () => {} } },
+      connection: { requestRejection: () => undefined, fetch: { register: () => () => {} } },
     })
     assert.equal(isTerminalModeAvailable(missingAgents.ctx), false)
 
     const complete = makeHarness({
       webServer: { register: () => () => {} },
-      connection: { requestRejection: () => undefined, rpc: { intercept: () => () => {} } },
+      connection: { requestRejection: () => undefined, fetch: { register: () => () => {} } },
       agents: { get: () => undefined },
     })
     assert.equal(isTerminalModeAvailable(complete.ctx), true)
@@ -1180,14 +1180,14 @@ describe('apply', () => {
 
   it('有 web 服务时注册 /cmd-terminal/rpc 路由，并让裸 /cmd 返回打开标记', async () => {
     const registered = []
-    const interceptions = []
+    const fetchRoutes = []
     const h = makeHarness({
       webServer: { register: (route) => (h.routes.push(route), () => {}) },
       connection: {
         requestRejection: () => undefined,
-        rpc: {
-          intercept: (channel, matches, handler) => {
-            interceptions.push({ channel, matches, handler })
+        fetch: {
+          register: (route) => {
+            fetchRoutes.push(route)
             return () => {}
           },
         },
@@ -1204,11 +1204,11 @@ describe('apply', () => {
     assert.equal(h.routes[0].kind, 'exact')
     assert.equal(h.routes[0].path, TERMINAL_ROUTE)
     assert.equal(typeof h.routes[0].handler, 'function')
-    assert.equal(interceptions.length, 1)
-    assert.equal(interceptions[0].channel, '/api')
-    assert.equal(interceptions[0].matches('cmd-terminal/rpc'), true)
-    assert.equal(interceptions[0].matches('other'), false)
-    assert.equal(typeof interceptions[0].handler, 'function')
+    assert.equal(fetchRoutes.length, 1)
+    assert.equal(fetchRoutes[0].path, 'cmd-terminal/rpc')
+    assert.deepEqual(fetchRoutes[0].methods, ['POST'])
+    assert.equal(fetchRoutes[0].requestBody, 'buffered')
+    assert.equal(typeof fetchRoutes[0].fetch, 'function')
 
     const out = await registered[0].handler({ agent: h.agent, rawInput: '', signal: undefined })
     assert.deepEqual(out, { kind: 'success', text: OPEN_MARKER })

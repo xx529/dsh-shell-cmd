@@ -94,7 +94,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 环境变量由 `dsh-bash-local` 决定：`bash -c` + 进程 env + `NO_COLOR/TERM=dumb/PAGER=cat/GIT_PAGER=cat` 覆盖，不加载用户 shell rc。改这一块前先读该包。
 10. **交互终端（裸 `/cmd`）**：
    - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`）并记录一次打开请求（`registry.requestOpen`）。Client 有两条触发路径：commandview 看到标记（快路径）与 `conversation.input.dock` 轮询 `status`（兜底，处理卡片未渲染/拿不到 sessionId 的情况）；卡片本身不渲染。
-   - RPC：首选共享 `/api` 通道——Host 用 `ctx.connection.rpc.intercept('/api', matcher, handler)` 暴露端点 `cmd-terminal/rpc`，Client 用 `ctx.get('connection').rpc('/api','cmd-terminal/rpc',payload)` 调用（Desktop 的 dsh-app 页面不能 POST 到页面 origin 的任意路径，会 405）。同时保留 `webServer.register({kind:'exact', path:'/cmd-terminal/rpc'})` + `connection.requestRejection` 的 HTTP 路由作为 Web 回退。
+   - RPC：首选共享 `/api` 精确路由——Host 用 `ctx.connection.fetch.register({path:'cmd-terminal/rpc', methods:['POST'], requestBody:'buffered', fetch})`，Client 用相对地址 `fetch('api/cmd-terminal/rpc', POST JSON)`（Desktop 的 dsh-app 页面会经 `/api` 桥代理并认证；不能 POST 到页面 origin 的其它路径，会 405）。`connection.rpc.intercept('/api')` 只允许一个拦截器，禁止使用。同时保留 `webServer.register({kind:'exact', path:'/cmd-terminal/rpc'})` + `connection.requestRejection` 的根路径 HTTP 路由作为 Web 回退。
    - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
    - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
    - 焦点：命令执行期间输入行用 `readOnly`（不要 `disabled`，否则焦点被浏览器移走），执行结束后 effect 把焦点还给输入行。
@@ -113,7 +113,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 114 例全绿）。
+- 提交前：`npm run check && npm test`（当前 117 例全绿）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`req`/`res`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`。

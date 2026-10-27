@@ -564,15 +564,11 @@ window.__ModuleLoader__.load({
     // 交互终端：打开状态（按 session）、RPC 客户端与面板
     // ------------------------------------------------------------------
 
-    /** Host 半端注册的固定 HTTP RPC 路径（与 terminal.js 的 TERMINAL_ROUTE 一致）。 */
-    const TERMINAL_RPC = '/cmd-terminal/rpc'
-    /** 共享 `/api` 通道上的端点名（与 terminal.js 的 TERMINAL_RPC_ENDPOINT 一致）。 */
-    const TERMINAL_RPC_ENDPOINT = 'cmd-terminal/rpc'
     /**
-     * Client 侧 `ctx.connection.rpc`（Desktop 的 dsh-app 页面首选传输）。
-     * 在 `apply` 里赋值；为空时退回同源 HTTP fetch。
+     * 共享 `/api` 桥上的相对路径（无前导斜杠：Desktop 的 dsh-app 页面也命中）。
+     * Host 侧用 `connection.fetch.register({ path: 'cmd-terminal/rpc' })` 提供。
      */
-    let terminalHostRpc = null
+    const TERMINAL_RPC = 'api/cmd-terminal/rpc'
     /** 裸 /cmd 的打开标记（与 terminal.js 的 OPEN_MARKER 一致）。 */
     const TERMINAL_MARKER = '[[dsh-shell-cmd:terminal]]'
     /** 只对“刚发生”的命令行打开终端，避免回放历史时误触发。 */
@@ -610,18 +606,9 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(subscribe, getSnapshot)
     }
 
-    /** 调用 Host 的终端 RPC：优先共享 `/api` 通道，其次同源 HTTP。 */
+    /** 调用 Host 的终端 RPC（共享 `/api` 精确路由，相对页面 base 解析）。 */
     async function terminalRpc(sessionId, method, params) {
       const payload = { method, params: { sessionId, ...(params ?? {}) } }
-      if (typeof terminalHostRpc === 'function') {
-        const response = await terminalHostRpc('/api', TERMINAL_RPC_ENDPOINT, payload)
-        if (response === null || typeof response !== 'object') throw new Error('terminal: empty rpc response')
-        if (response.ok !== true) {
-          const message = response.error?.message ?? response.error?.code ?? 'terminal rpc failed'
-          throw new Error(message)
-        }
-        return response.value
-      }
       const response = await fetch(TERMINAL_RPC, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -910,15 +897,6 @@ window.__ModuleLoader__.load({
      * @param {any} ctx 插件根上下文（inject: slots / locale）
      */
     function apply(ctx) {
-      try {
-        const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
-        terminalHostRpc =
-          connection !== undefined && connection !== null && typeof connection.rpc === 'function'
-            ? connection.rpc.bind(connection)
-            : null
-      } catch {
-        terminalHostRpc = null
-      }
       ctx.effect(() => insertStyle(), 'dsh-shell-cmd: card styles')
       let translate = null
       try {

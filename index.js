@@ -23,10 +23,9 @@
 import {
   OPEN_MARKER,
   TERMINAL_ROUTE,
-  TERMINAL_RPC_ENDPOINT,
   createTerminalRegistry,
   createTerminalRpcHandler,
-  createTerminalRpcResponder,
+  createTerminalFetchRoute,
 } from './terminal.js'
 
 /** Host 插件名（与包名一致，便于日志定位）。 */
@@ -332,12 +331,12 @@ function optionalService(ctx, name) {
  */
 export function isTerminalModeAvailable(ctx) {
   const connection = optionalService(ctx, 'connection')
-  const rpc = connection === undefined || connection === null ? undefined : connection.rpc
+  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
   return (
     optionalService(ctx, 'agents') !== undefined &&
-    rpc !== undefined &&
-    rpc !== null &&
-    typeof rpc.intercept === 'function'
+    fetchRoutes !== undefined &&
+    fetchRoutes !== null &&
+    typeof fetchRoutes.register === 'function'
   )
 }
 
@@ -459,19 +458,21 @@ export function apply(ctx, config = {}) {
   const webServer = optionalService(ctx, 'webServer')
   const connection = optionalService(ctx, 'connection')
 
-  // Desktop 的 dsh-app 页面不能把 POST 发到页面 origin 的任意路径，但能走共享
-  // `/api` RPC 通道；这条通道是终端的首选传输。
-  if (connection !== undefined && connection !== null && connection.rpc !== undefined) {
-    const rpc = connection.rpc
-    if (typeof rpc.intercept === 'function') {
-      const responder = createTerminalRpcResponder(registry)
-      ctx.effect(() => {
-        const off = rpc.intercept('/api', (endpoint) => endpoint === TERMINAL_RPC_ENDPOINT, responder)
-        return () => {
-          if (typeof off === 'function') Promise.resolve(off()).catch(() => {})
-        }
-      }, 'dsh-shell-cmd: terminal /api rpc')
-    }
+  // 首选传输：`connection.fetch` 的精确 `/api` 路由。浏览器半端用相对地址
+  // `api/cmd-terminal/rpc`；Desktop 的 dsh-app 页面会经共享 `/api` 桥代理并认证。
+  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
+  if (fetchRoutes !== undefined && fetchRoutes !== null && typeof fetchRoutes.register === 'function') {
+    const route = createTerminalFetchRoute(registry)
+    ctx.effect(
+      () =>
+        fetchRoutes.register({
+          path: 'cmd-terminal/rpc',
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: route,
+        }),
+      'dsh-shell-cmd: terminal /api fetch route',
+    )
   }
   if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
     const handler = createTerminalRpcHandler({

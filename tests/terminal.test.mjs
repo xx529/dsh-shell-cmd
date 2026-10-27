@@ -17,6 +17,7 @@ import {
   createTerminalRegistry,
   createTerminalRpcHandler,
   createTerminalRpcResponder,
+  createTerminalFetchRoute,
 } from '../terminal.js'
 
 // ---------------------------------------------------------------------------
@@ -448,6 +449,81 @@ describe('createTerminalRpcResponder（/api 通道）', () => {
 
     const missing = await responder(TERMINAL_RPC_ENDPOINT, { method: 'open', params: { sessionId: 'missing' } })
     assert.equal(missing.error.code, 'session-not-found')
+  })
+})
+
+describe('createTerminalFetchRoute（/api 精确路由）', () => {
+  it('POST open/send 返回 JSON Response', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
+    const route = createTerminalFetchRoute(h.registry)
+
+    const opened = await route(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'open', params: { sessionId: 's-1' } }),
+      }),
+    )
+    assert.equal(opened.status, 200)
+    const openedBody = await opened.json()
+    assert.equal(openedBody.ok, true)
+    assert.equal(openedBody.value.cwd, '/tmp/work')
+
+    const sent = await route(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'send', params: { sessionId: 's-1', text: 'echo x' } }),
+      }),
+    )
+    assert.equal(sent.status, 200)
+    assert.deepEqual((await sent.json()).value.lines, ['$ echo x', 'x'])
+  })
+
+  it('非法 JSON / 缺少 method / 未知方法返回 4xx JSON', async () => {
+    const h = makeHarness()
+    const route = createTerminalFetchRoute(h.registry)
+
+    const badJson = await route(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{oops',
+      }),
+    )
+    assert.equal(badJson.status, 400)
+
+    const noMethod = await route(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ params: { sessionId: 's-1' } }),
+      }),
+    )
+    assert.equal(noMethod.status, 400)
+
+    const unknown = await route(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'nope', params: { sessionId: 's-1' } }),
+      }),
+    )
+    assert.equal(unknown.status, 400)
+  })
+
+  it('会话不存在映射 404，busy 映射 409', async () => {
+    const h = makeHarness()
+    const route = createTerminalFetchRoute(h.registry)
+
+    const missing = await route(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'open', params: { sessionId: 'missing' } }),
+      }),
+    )
+    assert.equal(missing.status, 404)
   })
 })
 
