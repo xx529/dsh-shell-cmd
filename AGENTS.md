@@ -86,6 +86,10 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 本插件写过 → 更新为最新命令；
    - 人工改过（`source.kind==='user'` 且 seq 不匹配）→ **不要覆盖**。
    没有 `sessionTitle` 服务时静默跳过；`nameSession:false` 可关闭。
+9. **shell 沙箱策略必须显式传**，不能靠“不传 `sandboxPolicy`”来表示不沙箱：`@deepseek-ai/dsh-bash-sandbox` 的 `resolve()` 会把缺省值补成**部署默认策略**（`ctx.sandboxPolicy.resolve()`，不带 session），于是命令会跑在部署默认的 workspace root / 模式下（典型症状：`/cmd git pull` 报 `.git/FETCH_HEAD: Operation not permitted`）。
+   - 默认（人类命令）→ 显式 `{ mode: 'danger-full-access', workspaceRoot, sessionId }`，见 `resolveShellSandboxPolicy()`；
+   - `useSessionPolicy: true` → 用 `ctx.sandboxPolicy.resolve({ session })`，与模型 bash 工具同边界；
+   - 环境变量由 `dsh-bash-local` 决定：`bash -c` + 进程 env + `NO_COLOR/TERM=dumb/PAGER=cat/GIT_PAGER=cat` 覆盖，不加载用户 shell rc。改这一块前先读该包。
 
 ## 5. 修改指南
 
@@ -93,12 +97,12 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 - 卡片外观/交互 → `client.js` 的 `ShellCommandCard`；新文案同时加到 `en`/`zh` 两张字典和 `locale/*.json`（插件展示元数据）。
 - 命令名、描述、输入提示 → `apply()` 里的 `ctx.commands.register`；改了命令名必须同步改 Client 的 `commandview` key（当前 `cmd`）。
 - 输出上限/超时 → `DEFAULT_*`/`STDOUT_MAX_BYTES`；改动后同步 README 的表格。
-- **不要**把 `/cmd` 改成模型可调用的工具（`ctx.tools.register`）：它是人类动作，语义上不套模型 sandbox。
+- **不要**把 `/cmd` 改成模型可调用的工具（`ctx.tools.register`）：它是人类动作，默认不套沙箱（见第 4 节第 9 条）。
 - 新增文件后**必须同步 `package.json` 的 `files`**：仓库安装（tarball/git）按 `files` 打包，漏写会导致安装后运行时缺文件，且本地链接安装不会暴露这个问题。
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 61 例全绿）。
+- 提交前：`npm run check && npm test`（当前 68 例全绿）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`。
@@ -134,6 +138,8 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 | 卡片不出现、显示通用命令行 | `Slots.listSubTree root=conversation.chat.commandview` 是否有 `key=cmd`；页面是否刷新过 |
 | 卡片空白/崩溃 | 浏览器控制台 `slot entry crashed in 'conversation.chat.commandview'`；检查 `props.node` 防御与 locale 兜底 |
 | 会话名不变 | 该会话是否被人工改过名（尊重用户）；`sessionTitle` 服务是否存在；`nameSession` 配置 |
+| `/cmd` 报 `Operation not permitted` / `cannot open .git/FETCH_HEAD` | 沙箱策略被部署默认值接管：确认 `shell.resolve` 请求里带 `mode: 'danger-full-access'`（`resolveShellSandboxPolicy`）；见第 4 节第 9 条 |
+| 环境变量与终端不一致 | 已知设计：`bash -c` + DSH 进程 env，不加载 shell rc；用 `zsh -lc '…'` / 显式 `source` 兜底 |
 | 安装后缺文件 | `package.json` 的 `files` 是否覆盖新增文件；仓库安装按 `files` 打包 |
 | 插件行 active 但命令报错 | Host 侧 `apply` 抛错会被回滚；看 `.plugin-manager/logs` 或重载后的 fiber 状态 |
 

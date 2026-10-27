@@ -51,6 +51,7 @@ DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**�
 | 会话正在运行 | 命令照常执行；命令消息经 `agent.followup()` 排队，等当前轮次结束再送达 |
 | 取消 | 命令执行绑定 UI 请求的取消信号；被取消时不向模型发送任何内容 |
 | 会话标题 | 执行前用命令命名当前会话（见下节） |
+| 权限 / 沙箱 | 默认以 `danger-full-access` 运行（等价终端，见「权限与运行环境」） |
 
 ### 会话标题规则
 
@@ -65,9 +66,30 @@ DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**�
 
 命令会先做一行化处理（换行/连续空白折叠为单个空格），最终长度由标题服务的 `maxTitleBytes` 截断。标题失败（例如被服务拒绝）不影响命令执行。若不需要这个行为，在行配置里加 `nameSession: false`。
 
-### 安全说明
+### 权限与运行环境
 
-`/cmd` 是**人类显式输入**的命令，等价于用户自己在终端执行，因此默认**不**套用模型工具的 sandbox 策略（不传 `sandboxPolicy`）。它不是模型发起的工具调用；模型只能看到执行结果，不能借此执行命令。
+**权限（文件/网络）**：`/cmd` 是**人类显式输入**的命令，语义上等价于用户自己开终端执行，默认以
+`danger-full-access` 策略交给 `ctx.shell` 执行——即不套 macOS seatbelt 沙箱，可写工作区之外、可联网。
+
+> 注意：不能靠“不传 `sandboxPolicy`”来达到不沙箱。`@deepseek-ai/dsh-bash-sandbox` 的
+> `resolve()` 会把缺省值补成**部署默认策略**（`ctx.sandboxPolicy.resolve()`，不带 session），
+> 于是命令会跑在部署默认的 workspace root / 模式下。典型症状：在仓库里 `/cmd git pull`
+> 报 `error: cannot open .git/FETCH_HEAD: Operation not permitted`，而终端里正常。
+> 本插件显式传 `danger-full-access`，所以不会再出现这种“权限和终端不一致”。
+
+需要让 `/cmd` 与**模型 bash 工具**保持同一边界（例如会话策略是 `workspace-write` / `read-only`）时，
+在行配置里加 `useSessionPolicy: true`，此时改用该会话的 `ctx.sandboxPolicy.resolve({ session })`。
+
+**环境变量**：命令由 dsh 的本地 bash executor 以 `bash -c` 执行，环境是 **DSH 桌面进程的环境**：
+
+- 不加载你的交互式 shell rc（`~/.zshrc` / `~/.zprofile` / `~/.bash_profile`），因此 `PATH`、函数、别名、
+  部分工具链变量可能与终端不同；
+- 固定覆盖 `NO_COLOR=1`、`TERM=dumb`、`PAGER=cat`、`GIT_PAGER=cat`（保证输出适合卡片/模型）；
+- 不注入 `DSH_*`（除非显式传 `dshEnv`）。
+
+需要登录 shell 环境时，在命令里显式 `source`，或写成 `zsh -lc '…'` / `bash -lc '…'`。
+
+**不是模型工具**：`/cmd` 只由人触发，模型不能调用它；模型只能看到执行结果，不能借此执行命令。
 
 ## 安装
 
@@ -166,7 +188,7 @@ exit: 0
 | `DEFAULT_MAX_OUTPUT_CHARS` | `24000` | 卡片与模型文本各自保留的最大字符数 |
 | `STDOUT_MAX_BYTES` | `262144` | 执行器侧单流读取上限 |
 
-当前版本未导出 `Config`（避免依赖 schemastery）；`apply(ctx, config)` 仍会读取行配置中的 `timeoutMs` / `maxOutputChars` / `nameSession`（若 Loader 透传）。
+当前版本未导出 `Config`（避免依赖 schemastery）；`apply(ctx, config)` 仍会读取行配置中的 `timeoutMs` / `maxOutputChars` / `nameSession` / `useSessionPolicy`（若 Loader 透传）。
 
 ## 开发与验证
 
@@ -183,6 +205,8 @@ npm run verify  # check + test
 - 会话标题一旦由 `/cmd` 写入即为显式标题（user pin），之后不会再被自动标题改写；不想要这个行为时用 `nameSession: false`。
 - 输出上限是为了保护会话日志与模型上下文；需要完整输出时请改用重定向到文件再 `/cmd cat <file>`。
 - 不提供 shell 持久化：每次 `/cmd` 都是独立的 `bash -c` 会话，`cd` 不会跨调用保留。
+- 不加载交互式 shell rc，环境变量来自 DSH 进程而非你的终端；`TERM=dumb` 等覆盖也不适合全屏交互程序。
+- 默认 `danger-full-access` 意味着 `/cmd` 与终端一样能写任意路径、访问网络；介意这一点时用 `useSessionPolicy: true` 退回会话沙箱。
 
 ## License
 

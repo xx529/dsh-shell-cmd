@@ -25,6 +25,7 @@ import {
   createShellCommandMessage,
   titleFromCommand,
   syncSessionTitle,
+  resolveShellSandboxPolicy,
   executeShellCommand,
   apply,
 } from '../index.js'
@@ -49,8 +50,17 @@ function makeResult(overrides = {}) {
 /**
  * 构造伪 ctx / agent / 可注入的消息工厂，并记录所有调用。
  * - state.result 可在测试中途替换，execute 每次读取最新值。
+ * - sandboxPolicy / sessionTitle 为可选的伪服务，通过 ctx.get 暴露。
+ * - sessionCwd 模拟 `session.header.cwd`。
  */
-function makeHarness({ result = makeResult(), executeError = null, ensureResult = '/tmp/work', sessionTitle = null } = {}) {
+function makeHarness({
+  result = makeResult(),
+  executeError = null,
+  ensureResult = '/tmp/work',
+  sessionTitle = null,
+  sandboxPolicy = null,
+  sessionCwd = undefined,
+} = {}) {
   const state = { result, executeError }
   const resolveCalls = []
   const executeCalls = []
@@ -58,7 +68,10 @@ function makeHarness({ result = makeResult(), executeError = null, ensureResult 
   const ensureCalls = []
   const createdMessages = []
   const createMessageCalls = []
-  const session = { id: `session-${Math.random().toString(36).slice(2, 10)}` }
+  const session = {
+    id: `session-${Math.random().toString(36).slice(2, 10)}`,
+    ...(typeof sessionCwd === 'string' ? { header: { cwd: sessionCwd } } : {}),
+  }
 
   const ctx = {
     workingDirectory: {
@@ -79,7 +92,11 @@ function makeHarness({ result = makeResult(), executeError = null, ensureResult 
         return { result: async () => state.result }
       },
     },
-    get: (name) => (name === 'sessionTitle' && sessionTitle !== null ? sessionTitle : undefined),
+    get: (name) => {
+      if (name === 'sessionTitle' && sessionTitle !== null) return sessionTitle
+      if (name === 'sandboxPolicy' && sandboxPolicy !== null) return sandboxPolicy
+      return undefined
+    },
   }
 
   const agent = {
@@ -479,7 +496,7 @@ describe('executeShellCommand', () => {
     // 返回值
     assert.deepEqual(out, { kind: 'success', text: 'hello world' })
 
-    // 传入 shell.resolve 的请求：command 已 trim，含 workdir/timeoutMs/stdoutMaxBytes，且没有 sandboxPolicy
+    // 传入 shell.resolve 的请求：command 已 trim，含 workdir/timeoutMs/stdoutMaxBytes
     assert.equal(h.resolveCalls.length, 1)
     const request = h.resolveCalls[0]
     assert.equal(request.command, 'echo hi')
@@ -487,7 +504,11 @@ describe('executeShellCommand', () => {
     assert.equal(request.timeoutMs, DEFAULT_TIMEOUT_MS)
     assert.equal(request.stdoutMaxBytes, STDOUT_MAX_BYTES)
     assert.equal(request.onExpiry, 'kill')
-    assert.equal(Object.hasOwn(request, 'sandboxPolicy'), false)
+    // /cmd 是人工命令：显式以 danger-full-access 运行，避免部署默认沙箱策略
+    // （bash-sandbox 的 resolve() 会在缺省时补上部署默认 policy）。
+    assert.equal(request.sandboxPolicy.mode, 'danger-full-access')
+    assert.equal(request.sandboxPolicy.workspaceRoot, '/tmp/work')
+    assert.equal(request.sandboxPolicy.sessionId, h.session.id)
     // 没有传入 signal 时不带 signal 字段
     assert.equal(Object.hasOwn(request, 'signal'), false)
 
@@ -823,6 +844,105 @@ describe('executeShellCommand 与会话标题', () => {
     assert.equal(out.kind, 'success')
     assert.equal(out.text, 'ok')
     assert.equal(h.followups.length, 1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 沙箱策略
+// ---------------------------------------------------------------------------
+
+describe('resolveShellSandboxPolicy', () => {
+  it('默认返回 danger-full-access，并带上会话 cwd 与 sessionId', () => {
+    const h = makeHarness({ sessionCwd: '/Users/me/project' })
+
+    const policy = resolveShellSandboxPolicy(h.ctx, h.agent, '/Users/me/project/sub')
+
+    assert.equal(policy.mode, 'danger-full-access')
+    assert.equal(policy.workspaceRoot, '/Users/me/project')
+    assert.equal(policy.sessionId, h.session.id)
+  })
+
+  it('没有 session.header.cwd 时用 workdir 作为 workspaceRoot', () => {
+    const h = makeHarness()
+
+    const policy = resolveShellSandboxPolicy(h.ctx, h.agent, '/tmp/work')
+
+    assert.equal(policy.workspaceRoot, '/tmp/work')
+  })
+
+  it('useSessionPolicy=true 时采用会话策略服务的结果', () => {
+    const calls = []
+    const sandboxPolicy = {
+      resolve: (request) => {
+        calls.push(request)
+        return { mode: 'workspace-write', workspaceRoot: '/Users/me/project', sessionId: 's-1' }
+      },
+    }
+    const h = makeHarness({ sandboxPolicy, sessionCwd: '/Users/me/project' })
+
+    const policy = resolveShellSandboxPolicy(h.ctx, h.agent, '/Users/me/project', { useSessionPolicy: true })
+
+    assert.deepEqual(policy, { mode: 'workspace-write', workspaceRoot: '/Users/me/project', sessionId: 's-1' })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].session, h.session)
+  })
+
+  it('useSessionPolicy=true 但服务缺失 / 抛错时退回 danger-full-access', () => {
+    const noService = makeHarness()
+    assert.equal(
+      resolveShellSandboxPolicy(noService.ctx, noService.agent, '/tmp/work', { useSessionPolicy: true }).mode,
+      'danger-full-access',
+    )
+
+    const throwing = makeHarness({
+      sandboxPolicy: {
+        resolve: () => {
+          throw new Error('policy unavailable')
+        },
+      },
+    })
+    assert.equal(
+      resolveShellSandboxPolicy(throwing.ctx, throwing.agent, '/tmp/work', { useSessionPolicy: true }).mode,
+      'danger-full-access',
+    )
+  })
+
+  it('useSessionPolicy=true 但服务返回值非法时退回 danger-full-access', () => {
+    const h = makeHarness({ sandboxPolicy: { resolve: () => undefined } })
+
+    const policy = resolveShellSandboxPolicy(h.ctx, h.agent, '/tmp/work', { useSessionPolicy: true })
+
+    assert.equal(policy.mode, 'danger-full-access')
+  })
+})
+
+describe('executeShellCommand 与沙箱策略', () => {
+  it('默认把 danger-full-access 策略传给 shell.resolve', async () => {
+    const h = makeHarness({ result: makeResult({ stdout: { text: 'ok' } }) })
+
+    await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: 'git pull', signal: undefined },
+      { createMessage: h.createMessage },
+    )
+
+    assert.equal(h.resolveCalls[0].sandboxPolicy.mode, 'danger-full-access')
+  })
+
+  it('useSessionPolicy=true 时把会话策略传给 shell.resolve', async () => {
+    const h = makeHarness({
+      result: makeResult({ stdout: { text: 'ok' } }),
+      sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: '/tmp/work', sessionId: 's-1' }) },
+    })
+
+    await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: 'ls', signal: undefined },
+      { createMessage: h.createMessage, useSessionPolicy: true },
+    )
+
+    assert.equal(h.resolveCalls[0].sandboxPolicy.mode, 'workspace-write')
+    assert.equal(h.resolveCalls[0].sandboxPolicy.workspaceRoot, '/tmp/work')
   })
 })
 

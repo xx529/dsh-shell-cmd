@@ -231,15 +231,68 @@ export function syncSessionTitle(ctx, agent, command) {
 }
 
 /**
+ * 解析 `/cmd` 调用要使用的 shell 沙箱策略。
+ *
+ * 关键事实：`ctx.shell`（bash-sandbox executor）在 `resolve()` 里会把**缺省的**
+ * `sandboxPolicy` 补成部署级默认策略（`ctx.sandboxPolicy.resolve()`，没有 session），
+ * 于是 `/cmd` 会跑在部署默认的 workspace root / 模式里，出现 `git pull` 写
+ * `.git/FETCH_HEAD` 报 `Operation not permitted` 这类与终端不一致的行为。
+ *
+ * `/cmd` 是**人类显式输入**的命令，语义上等价于用户自己开终端执行，所以默认显式传入
+ * `danger-full-access` 策略（executor 直接走不套沙箱的本地执行路径）。
+ * `useSessionPolicy: true` 时改为采用该会话的策略（workspace-write / read-only），
+ * 让 `/cmd` 与模型的 bash 工具保持同一边界。
+ *
+ * @param {any} ctx 插件上下文
+ * @param {any} agent 接收命令的 Agent
+ * @param {string} workdir 已解析的工作目录（绝对路径）
+ * @param {{ useSessionPolicy?: boolean }} [options]
+ * @returns {{ mode: string, workspaceRoot: string, sessionId?: string }}
+ */
+export function resolveShellSandboxPolicy(ctx, agent, workdir, options = {}) {
+  const session = agent?.session
+  const sessionCwd = session?.header?.cwd
+  const workspaceRoot =
+    typeof sessionCwd === 'string' && sessionCwd.length > 0
+      ? sessionCwd
+      : typeof workdir === 'string' && workdir.length > 0
+        ? workdir
+        : process.cwd()
+  const sessionId = session?.id ?? agent?.id
+  if (options.useSessionPolicy === true) {
+    let service
+    try {
+      service = typeof ctx?.get === 'function' ? ctx.get('sandboxPolicy') : undefined
+    } catch {
+      service = undefined
+    }
+    if (service !== undefined && service !== null && typeof service.resolve === 'function' && session !== undefined) {
+      try {
+        const resolved = service.resolve({ session })
+        if (resolved !== undefined && resolved !== null && typeof resolved.mode === 'string') return resolved
+      } catch {
+        /* 解析失败时退回不受限执行，保证人类命令可用。 */
+      }
+    }
+  }
+  return {
+    mode: 'danger-full-access',
+    workspaceRoot,
+    ...(sessionId === undefined ? {} : { sessionId }),
+  }
+}
+
+/**
  * 执行一条命令并返回结果。
  * @param {any} ctx 插件上下文
  * @param {any} agent 接收该命令的 Agent
  * @param {string} command 命令原文
  * @param {AbortSignal} [signal] 调用方取消信号
  * @param {number} [timeoutMs] 超时
+ * @param {{ useSessionPolicy?: boolean }} [options] 沙箱策略选项
  * @returns {Promise<{ result: object, cwd: string }>}
  */
-export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_TIMEOUT_MS) {
+export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_TIMEOUT_MS, options = {}) {
   const workdir = await ctx.workingDirectory.ensure(agent, signal)
   const spec = ctx.shell.resolve({
     command,
@@ -247,6 +300,7 @@ export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_
     timeoutMs,
     stdoutMaxBytes: STDOUT_MAX_BYTES,
     onExpiry: 'kill',
+    sandboxPolicy: resolveShellSandboxPolicy(ctx, agent, workdir, options),
     ...(signal === undefined ? {} : { signal }),
   })
   const execution = await ctx.shell.execute(spec)
@@ -257,7 +311,7 @@ export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_
  * `/cmd` 的处理逻辑（与注册分离，便于测试）。
  * @param {any} ctx 插件上下文
  * @param {{ agent: any, rawInput: string, signal: AbortSignal }} invocation 命令调用
- * @param {{ timeoutMs?: number, maxOutputChars?: number, nameSession?: boolean, createMessage?: (text: string, command: string) => any }} [options]
+ * @param {{ timeoutMs?: number, maxOutputChars?: number, nameSession?: boolean, useSessionPolicy?: boolean, createMessage?: (text: string, command: string) => any }} [options]
  * @returns {Promise<{ kind: 'success' | 'error', text: string }>}
  */
 export async function executeShellCommand(ctx, invocation, options = {}) {
@@ -274,9 +328,10 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
   // 用命令命名会话（在开始执行前就生效，侧边栏立即可见）。
   if (options.nameSession !== false) syncSessionTitle(ctx, invocation.agent, command)
 
+  const shellOptions = { useSessionPolicy: options.useSessionPolicy === true }
   let run
   try {
-    run = await runShell(ctx, invocation.agent, command, invocation.signal, timeoutMs)
+    run = await runShell(ctx, invocation.agent, command, invocation.signal, timeoutMs, shellOptions)
   } catch (error) {
     if (invocation.signal?.aborted) return { kind: 'error', text: 'Command cancelled.' }
     const message = error instanceof Error ? error.message : String(error)
@@ -305,13 +360,14 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
 /**
  * 注册 `/cmd`。
  * @param {any} ctx 插件上下文
- * @param {any} [config] 行配置（可选 timeoutMs / maxOutputChars / nameSession）
+ * @param {any} [config] 行配置（可选 timeoutMs / maxOutputChars / nameSession / useSessionPolicy）
  */
 export function apply(ctx, config = {}) {
   const options = {
     ...(Number.isFinite(config?.timeoutMs) ? { timeoutMs: config.timeoutMs } : {}),
     ...(Number.isFinite(config?.maxOutputChars) ? { maxOutputChars: config.maxOutputChars } : {}),
     ...(config?.nameSession === false ? { nameSession: false } : {}),
+    ...(config?.useSessionPolicy === true ? { useSessionPolicy: true } : {}),
   }
   ctx.commands.register({
     name: 'cmd',
