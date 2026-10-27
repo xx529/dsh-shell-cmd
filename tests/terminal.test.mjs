@@ -384,6 +384,18 @@ describe('createTerminalRegistry', () => {
     assert.equal(h.registry.read('s-1'), undefined)
   })
 
+  it('close（Esc）只丢弃终端内容：不 followup、不改标题', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'secret output' })] })
+    await h.registry.open('s-1')
+    await h.registry.send('s-1', 'echo secret')
+    assert.equal(h.registry.close('s-1'), true)
+
+    // 只有 finish 才会把 transcript 交给模型；close 不产生任何模型消息。
+    assert.equal(h.calls.followup.length, 0)
+    assert.equal(h.calls.title.length, 0)
+    assert.equal(h.registry.has('s-1'), false)
+  })
+
   it('terminalTranscript 返回完整滚动文本', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
     await h.registry.send('s-1', 'echo x')

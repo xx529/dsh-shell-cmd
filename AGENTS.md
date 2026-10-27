@@ -101,6 +101,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 布局：面板注册在 `conversation.composer.dock`（输入框下方、与输入框同宽），`width:100%; box-sizing:border-box`。
    - 轮询：命令被 claim（`/cmd` 被认领且无参数）时立即打开面板；提交后 8s 内以 180ms 快速轮询 `status`，其余时间 1.2s 低频兜底。
    - 记录：任何带 OPEN_MARKER 的空参数 cmd 结果都**不渲染卡片**（否则 Esc 关闭后会留下一条莫名卡片）。
+   - 语义边界：只有 `finish`（Ctrl+Enter）调用 `agent.followup`；`close`（Esc）只 abort 运行中命令并删除终端状态，**绝不 followup**。`command/run` / `command/done` 是 log-only，不经模型。修改这两条路径时必须保持该不变量，并有测试覆盖。
    - 限制：按行 REPL，不支持全屏 TUI / 真 TTY；不要把它改成 `ctx.terminals`（PTY 受会话沙箱限制，与人类命令的 danger-full-access 语义冲突）。
 
 ## 5. 修改指南
