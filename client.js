@@ -39,6 +39,18 @@ window.__ModuleLoader__.load({
       'action.copyFailed': 'Copy failed',
       'card.label': 'Shell command',
       'hint.active': 'Shell command mode: the command runs first, then the command and its output are sent to the model.',
+      'terminal.title': 'Interactive terminal',
+      'terminal.cwd': 'cwd {path}',
+      'terminal.running': 'Running…',
+      'terminal.idle': 'Ready',
+      'terminal.sent': 'Sent to the model',
+      'terminal.placeholder': 'Type a command and press Enter',
+      'terminal.hint': 'Enter runs · Ctrl+C interrupts · Ctrl+Enter sends to the model · Esc closes',
+      'terminal.send': 'Send to model (Ctrl+Enter)',
+      'terminal.close': 'Close',
+      'terminal.cancel': 'Interrupt',
+      'terminal.empty': 'Run at least one command before sending.',
+      'terminal.loading': 'Opening terminal…',
     }
 
     const zh = {
@@ -57,6 +69,18 @@ window.__ModuleLoader__.load({
       'action.copyFailed': '复制失败',
       'card.label': '终端命令',
       'hint.active': '终端命令模式：先执行命令，再把命令与输出一起发给模型。',
+      'terminal.title': '交互终端',
+      'terminal.cwd': 'cwd {path}',
+      'terminal.running': '执行中…',
+      'terminal.idle': '就绪',
+      'terminal.sent': '已发送给模型',
+      'terminal.placeholder': '输入命令后回车执行',
+      'terminal.hint': 'Enter 执行 · Ctrl+C 中断 · Ctrl+Enter 发送给模型 · Esc 关闭',
+      'terminal.send': '发送给模型 (Ctrl+Enter)',
+      'terminal.close': '关闭',
+      'terminal.cancel': '中断',
+      'terminal.empty': '至少执行一条命令后才能发送。',
+      'terminal.loading': '正在打开终端…',
     }
 
     /** 卡片样式；颜色一律走宿主主题令牌，明暗主题自动跟随。 */
@@ -193,6 +217,95 @@ window.__ModuleLoader__.load({
 }
 @media (prefers-reduced-motion: reduce) { .dsc-hint-dot { animation: none; } }
 .dsc-hint-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-term {
+  margin: 6px 0 2px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  overflow: hidden;
+  font-size: 12px;
+}
+.dsc-term-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary);
+}
+.dsc-term-title { flex: none; font-weight: 600; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsc-term-cwd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.dsc-term-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.dsc-term-status[data-tone="running"] { color: var(--dsw-alias-state-warn-primary); }
+.dsc-term-status[data-tone="sent"] { color: var(--dsw-alias-state-success-primary); }
+.dsc-term-body {
+  display: block;
+  margin: 0;
+  padding: 8px 10px;
+  height: 220px;
+  overflow: auto;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dsc-term-body-empty { color: var(--dsw-alias-label-secondary); }
+.dsc-term-error { padding: 4px 10px; color: var(--dsw-alias-state-error-primary); font-size: 11.5px; }
+.dsc-term-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 4px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+.dsc-term-prompt {
+  flex: none;
+  color: var(--dsw-alias-state-success-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+.dsc-term-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+.dsc-term-input:disabled { color: var(--dsw-alias-label-secondary); }
+.dsc-term-hint {
+  padding: 0 10px 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.dsc-term-note { padding: 4px 10px; color: var(--dsw-alias-state-success-primary); font-size: 11.5px; }
 `
 
     /** 注入卡片样式，返回卸载清理函数。 */
@@ -268,6 +381,19 @@ window.__ModuleLoader__.load({
       const long = lines.length > 10 || body.length > 1200
       const [expanded, setExpanded] = React.useState(false)
       const [copyState, setCopyState] = React.useState('idle')
+
+      // 裸 /cmd 的 CommandResult 只用来打开交互终端：卡片本身不渲染；
+      // 只在“刚发生”时触发，避免回放历史记录时误开终端。
+      const opensTerminal =
+        args.trim().length === 0 &&
+        typeof outcome?.text === 'string' &&
+        outcome.text.startsWith(TERMINAL_MARKER) &&
+        typeof node.time === 'number' &&
+        Date.now() - node.time < TERMINAL_OPEN_FRESH_MS
+      React.useEffect(() => {
+        if (opensTerminal) setTerminalOpen(props.sessionId, true)
+      }, [opensTerminal, props.sessionId, node.seq])
+      if (opensTerminal) return null
 
       const t = typeof props.t === 'function' ? props.t : null
       const tr = (key, params) => {
@@ -430,6 +556,280 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ------------------------------------------------------------------
+    // 交互终端：打开状态（按 session）、RPC 客户端与面板
+    // ------------------------------------------------------------------
+
+    /** Host 半端注册的固定 RPC 路径（与 terminal.js 的 TERMINAL_ROUTE 一致）。 */
+    const TERMINAL_RPC = '/cmd-terminal/rpc'
+    /** 裸 /cmd 的打开标记（与 terminal.js 的 OPEN_MARKER 一致）。 */
+    const TERMINAL_MARKER = '[[dsh-shell-cmd:terminal]]'
+    /** 只对“刚发生”的命令行打开终端，避免回放历史时误触发。 */
+    const TERMINAL_OPEN_FRESH_MS = 15000
+
+    /** sessionId → 是否打开终端面板。 */
+    const terminalOpenState = new Map()
+    const terminalListeners = new Set()
+
+    function notifyTerminalListeners() {
+      for (const listener of terminalListeners) {
+        try {
+          listener()
+        } catch {
+          /* 单个订阅者异常不影响其它订阅者 */
+        }
+      }
+    }
+
+    /** 设置某个会话的终端面板开关。 */
+    function setTerminalOpen(sessionId, open) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return
+      const previous = terminalOpenState.get(sessionId) === true
+      terminalOpenState.set(sessionId, open)
+      if (previous !== open) notifyTerminalListeners()
+    }
+
+    /** 订阅某个会话的终端面板开关。 */
+    function useTerminalOpen(sessionId) {
+      const subscribe = (listener) => {
+        terminalListeners.add(listener)
+        return () => terminalListeners.delete(listener)
+      }
+      const getSnapshot = () => typeof sessionId === 'string' && terminalOpenState.get(sessionId) === true
+      return React.useSyncExternalStore(subscribe, getSnapshot)
+    }
+
+    /** 调用 Host 的终端 RPC。 */
+    async function terminalRpc(sessionId, method, params) {
+      const response = await fetch(TERMINAL_RPC, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method, params: { sessionId, ...(params ?? {}) } }),
+      })
+      let json = null
+      try {
+        json = await response.json()
+      } catch {
+        json = null
+      }
+      if (json === null || json.ok !== true) {
+        const message = json?.error?.message ?? `HTTP ${response.status}`
+        throw new Error(message)
+      }
+      return json.value
+    }
+
+    /** 与卡片一致的翻译函数（带英文兜底）。 */
+    function makeTranslator(t) {
+      return (key, params) => {
+        if (typeof t === 'function') {
+          try {
+            return t(key, params)
+          } catch {
+            /* 宿主 locale 未就绪时回退到内置英文 */
+          }
+        }
+        let value = en[key] ?? key
+        if (params !== undefined && params !== null) {
+          for (const name of Object.keys(params)) value = value.split(`{${name}}`).join(String(params[name]))
+        }
+        return value
+      }
+    }
+
+    /**
+     * 交互终端面板：输出滚动区 + 单行输入 + 快捷键。
+     * Enter 执行、Ctrl+C 中断、Ctrl+Enter 发送给模型、Esc 关闭。
+     * @param {{ sessionId: string, tr: Function }} props
+     */
+    function TerminalView(props) {
+      const { sessionId, tr } = props
+      const [lines, setLines] = React.useState([])
+      const [cwd, setCwd] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [sent, setSent] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const [value, setValue] = React.useState('')
+      const [loading, setLoading] = React.useState(true)
+      const bodyRef = React.useRef(null)
+      const inputRef = React.useRef(null)
+
+      const applySnapshot = (snapshot) => {
+        if (snapshot === null || typeof snapshot !== 'object') return
+        if (Array.isArray(snapshot.lines)) setLines(snapshot.lines)
+        if (typeof snapshot.cwd === 'string' && snapshot.cwd.length > 0) setCwd(snapshot.cwd)
+        if (snapshot.sent === true) setSent(true)
+      }
+
+      React.useEffect(() => {
+        let cancelled = false
+        setLoading(true)
+        setError(null)
+        setSent(false)
+        setLines([])
+        terminalRpc(sessionId, 'open').then(
+          (snapshot) => {
+            if (cancelled) return
+            applySnapshot(snapshot)
+            setLoading(false)
+          },
+          (cause) => {
+            if (cancelled) return
+            setError(cause instanceof Error ? cause.message : String(cause))
+            setLoading(false)
+          },
+        )
+        return () => {
+          cancelled = true
+        }
+      }, [sessionId])
+
+      React.useEffect(() => {
+        const element = bodyRef.current
+        if (element !== null) element.scrollTop = element.scrollHeight
+      }, [lines, busy, loading])
+
+      React.useEffect(() => {
+        if (!loading && !sent) inputRef.current?.focus()
+      }, [loading, sent])
+
+      const close = () => {
+        terminalRpc(sessionId, 'close').catch(() => {})
+        setTerminalOpen(sessionId, false)
+      }
+
+      const send = async () => {
+        if (busy || sent) return
+        if (value.trim().length === 0) return
+        const text = value
+        setBusy(true)
+        setError(null)
+        setValue('')
+        try {
+          applySnapshot(await terminalRpc(sessionId, 'send', { text }))
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const finish = async () => {
+        if (busy) {
+          setError(tr('terminal.running'))
+          return
+        }
+        if (sent) return
+        const hasCommand = lines.some((line) => typeof line === 'string' && line.startsWith('$ '))
+        if (!hasCommand) {
+          setError(tr('terminal.empty'))
+          return
+        }
+        setError(null)
+        try {
+          applySnapshot(await terminalRpc(sessionId, 'finish'))
+          setSent(true)
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        }
+      }
+
+      const interrupt = () => {
+        if (busy) {
+          terminalRpc(sessionId, 'cancel').catch(() => {})
+          return
+        }
+        setValue('')
+      }
+
+      const onKeyDown = (event) => {
+        if (event.nativeEvent !== undefined && event.nativeEvent.isComposing === true) return
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault()
+          event.stopPropagation()
+          void finish()
+          return
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          close()
+          return
+        }
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          event.stopPropagation()
+          void send()
+          return
+        }
+        if ((event.key === 'c' || event.key === 'C') && event.ctrlKey) {
+          event.preventDefault()
+          interrupt()
+        }
+      }
+
+      const statusText = sent ? tr('terminal.sent') : busy ? tr('terminal.running') : tr('terminal.idle')
+      const tone = sent ? 'sent' : busy ? 'running' : 'idle'
+
+      return h(
+        'div',
+        { className: 'dsc-term', 'data-terminal': sessionId },
+        h(
+          'div',
+          { className: 'dsc-term-head' },
+          h('span', { className: 'dsc-term-title' }, tr('terminal.title')),
+          h('span', { className: 'dsc-term-cwd', title: cwd }, tr('terminal.cwd', { path: cwd.length > 0 ? cwd : '…' })),
+          h('span', { className: 'dsc-term-status', 'data-tone': tone }, statusText),
+          h('button', { type: 'button', className: 'dsc-btn', onClick: close }, tr('terminal.close')),
+        ),
+        h(
+          'pre',
+          {
+            className: lines.length === 0 ? 'dsc-term-body dsc-term-body-empty' : 'dsc-term-body',
+            ref: bodyRef,
+            'aria-label': tr('terminal.title'),
+          },
+          loading ? tr('terminal.loading') : lines.length > 0 ? lines.join('\n') : tr('terminal.placeholder'),
+        ),
+        error !== null ? h('div', { className: 'dsc-term-error', role: 'alert' }, error) : null,
+        sent ? h('div', { className: 'dsc-term-note' }, tr('terminal.sent')) : null,
+        h(
+          'div',
+          { className: 'dsc-term-foot' },
+          h('span', { className: 'dsc-term-prompt', 'aria-hidden': 'true' }, '$'),
+          h('input', {
+            className: 'dsc-term-input',
+            ref: inputRef,
+            value,
+            disabled: busy || sent,
+            placeholder: tr('terminal.placeholder'),
+            'aria-label': tr('terminal.placeholder'),
+            autoComplete: 'off',
+            spellCheck: false,
+            onChange: (event) => setValue(event.target.value),
+            onKeyDown,
+          }),
+          h(
+            'button',
+            { type: 'button', className: 'dsc-btn', disabled: busy || sent, onClick: () => void finish() },
+            tr('terminal.send'),
+          ),
+        ),
+        h('div', { className: 'dsc-term-hint' }, tr('terminal.hint')),
+      )
+    }
+
+    /**
+     * `conversation.input.dock` 条目：终端打开时渲染面板。
+     * @param {{ sessionId?: string, t?: Function }} props
+     */
+    function TerminalDock(props) {
+      const sessionId = props.sessionId
+      const open = useTerminalOpen(sessionId)
+      if (!open || typeof sessionId !== 'string' || sessionId.length === 0) return null
+      return h(TerminalView, { sessionId, tr: makeTranslator(props.t) })
+    }
+
     /**
      * 插件装配：一切注册都走 `ctx.effect`，卸载时全部撤销。
      * @param {any} ctx 插件根上下文（inject: slots / locale）
@@ -466,6 +866,19 @@ window.__ModuleLoader__.load({
             order: 20,
           },
           HintView,
+        ),
+      )
+
+      const TerminalEntry = (props) => h(TerminalDock, translate === null ? props : { ...props, t: translate })
+      TerminalEntry.displayName = 'DshShellCmdTerminal'
+      ctx.slots.inject('conversation.input.dock', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.input.dock',
+            id: 'shell-cmd-terminal',
+            order: 10,
+          },
+          TerminalEntry,
         ),
       )
     }

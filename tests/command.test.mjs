@@ -27,9 +27,12 @@ import {
   isConversationStart,
   syncSessionTitle,
   resolveShellSandboxPolicy,
+  isTerminalModeAvailable,
   executeShellCommand,
   apply,
 } from '../index.js'
+
+import { OPEN_MARKER, TERMINAL_ROUTE } from '../terminal.js'
 
 // ---------------------------------------------------------------------------
 // 测试夹具
@@ -54,6 +57,7 @@ function makeResult(overrides = {}) {
  * - sandboxPolicy / sessionTitle 为可选的伪服务，通过 ctx.get 暴露。
  * - sessionCwd 模拟 `session.header.cwd`；sessionEvents 模拟 `session.snapshotEvents()`。
  * - inbox 模拟 Agent 的待处理输入（nextTurn / nextStep）。
+ * - webServer / connection / agents 模拟交互终端所需的可选服务；routes 记录注册的路由。
  */
 function makeHarness({
   result = makeResult(),
@@ -64,6 +68,9 @@ function makeHarness({
   sessionCwd = undefined,
   sessionEvents = [],
   inbox = undefined,
+  webServer = null,
+  connection = null,
+  agents = null,
 } = {}) {
   const state = { result, executeError }
   const resolveCalls = []
@@ -72,6 +79,7 @@ function makeHarness({
   const ensureCalls = []
   const createdMessages = []
   const createMessageCalls = []
+  const routes = []
   const events = [...sessionEvents]
   const session = {
     id: `session-${Math.random().toString(36).slice(2, 10)}`,
@@ -98,9 +106,19 @@ function makeHarness({
         return { result: async () => state.result }
       },
     },
+    // cordis effect：执行回调并保留其清理函数。
+    effect: (callback) => {
+      const cleanup = typeof callback === 'function' ? callback() : undefined
+      return () => {
+        if (typeof cleanup === 'function') cleanup()
+      }
+    },
     get: (name) => {
       if (name === 'sessionTitle' && sessionTitle !== null) return sessionTitle
       if (name === 'sandboxPolicy' && sandboxPolicy !== null) return sandboxPolicy
+      if (name === 'webServer' && webServer !== null) return webServer
+      if (name === 'connection' && connection !== null) return connection
+      if (name === 'agents' && agents !== null) return agents
       return undefined
     },
   }
@@ -134,6 +152,7 @@ function makeHarness({
     agent,
     session,
     events,
+    routes,
     resolveCalls,
     executeCalls,
     followups,
@@ -493,6 +512,42 @@ describe('executeShellCommand', () => {
     assert.equal(h.resolveCalls.length, 0)
     assert.equal(h.executeCalls.length, 0)
     assert.equal(h.followups.length, 0)
+  })
+
+  it('裸 /cmd：有 web 服务时返回终端打开标记，不执行命令、不 followup', async () => {
+    const routes = []
+    const h = makeHarness({
+      webServer: { register: (route) => (routes.push(route), () => {}) },
+      connection: { requestRejection: () => undefined },
+      agents: { get: () => undefined },
+    })
+
+    const out = await executeShellCommand(h.ctx, { agent: h.agent, rawInput: '   ', signal: undefined })
+
+    assert.deepEqual(out, { kind: 'success', text: OPEN_MARKER })
+    assert.equal(h.ensureCalls.length, 0)
+    assert.equal(h.resolveCalls.length, 0)
+    assert.equal(h.executeCalls.length, 0)
+    assert.equal(h.followups.length, 0)
+    assert.equal(routes.length, 0) // 路由由 apply 注册，这里只验证标记
+  })
+
+  it('isTerminalModeAvailable 需要 webServer + connection + agents 三者齐全', () => {
+    const none = makeHarness()
+    assert.equal(isTerminalModeAvailable(none.ctx), false)
+
+    const missingAgents = makeHarness({
+      webServer: { register: () => () => {} },
+      connection: { requestRejection: () => undefined },
+    })
+    assert.equal(isTerminalModeAvailable(missingAgents.ctx), false)
+
+    const complete = makeHarness({
+      webServer: { register: () => () => {} },
+      connection: { requestRejection: () => undefined },
+      agents: { get: () => undefined },
+    })
+    assert.equal(isTerminalModeAvailable(complete.ctx), true)
   })
 
   it('成功路径：resolve 请求字段正确、followup 恰好一次、消息结构完整', async () => {
@@ -1114,5 +1169,40 @@ describe('apply', () => {
     assert.equal(h.followups[0].role, 'user')
     assert.equal(h.followups[0].source.kind, 'shell-command')
     assert.equal(h.followups[0].source.command, 'echo big')
+  })
+
+  it('有 web 服务时注册 /cmd-terminal/rpc 路由，并让裸 /cmd 返回打开标记', async () => {
+    const registered = []
+    const h = makeHarness({
+      webServer: { register: (route) => (h.routes.push(route), () => {}) },
+      connection: { requestRejection: () => undefined },
+      agents: { get: () => undefined },
+    })
+    const ctx = {
+      ...h.ctx,
+      commands: { register: (definition) => registered.push(definition) },
+    }
+    apply(ctx)
+
+    assert.equal(h.routes.length, 1)
+    assert.equal(h.routes[0].kind, 'exact')
+    assert.equal(h.routes[0].path, TERMINAL_ROUTE)
+    assert.equal(typeof h.routes[0].handler, 'function')
+
+    const out = await registered[0].handler({ agent: h.agent, rawInput: '', signal: undefined })
+    assert.deepEqual(out, { kind: 'success', text: OPEN_MARKER })
+  })
+
+  it('没有 web 服务时只注册命令、不注册终端路由', () => {
+    const registered = []
+    const h = makeHarness()
+    const ctx = {
+      ...h.ctx,
+      commands: { register: (definition) => registered.push(definition) },
+    }
+    apply(ctx)
+
+    assert.equal(registered.length, 1)
+    assert.equal(h.routes.length, 0)
   })
 })

@@ -1,6 +1,9 @@
 # dsh-shell-cmd
 
-DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**先执行命令**，再把「命令 + 输出」一起发给模型，并让这次输入在对话里以**终端卡片**渲染，而不是一段纯文本 prompt。
+DeepSeek Harness（dsh）插件，提供两种终端输入方式：
+
+- `/cmd <终端命令>`：**先执行命令**，再把「命令 + 输出」一起发给模型，并在对话里以**终端卡片**渲染；
+- 裸 `/cmd`：在输入框上方打开**交互终端**，逐条执行命令，按 **Ctrl+Enter** 把整段终端内容发给模型。
 
 对标 Claude Code 的 `!<command>` 能力，区别是这里会把命令与输出明确交给模型，并要求模型据此回复。
 
@@ -20,9 +23,10 @@ DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**�
 ```
 
 - 命令卡片：等宽字体、`$` 提示符、状态胶囊（执行中 / 退出码 / 超时 / 取消）、可展开的长输出、复制按钮。
+- 交互终端：裸 `/cmd` 打开面板，Enter 逐条执行、Ctrl+Enter 发送给模型、Esc 关闭（详见下文）。
 - 输入提示：输入框草稿进入 `/cmd` 模式时，下方出现「终端命令模式」提示条。
 - 模型输入：一条 user 消息，正文包含「用户手动执行了此命令」、命令原文、cwd、退出状态与 stdout/stderr。
-- 会话标题：执行 `/cmd` 时自动用**命令本身**命名当前会话（例如侧边栏从「未命名」变成 `git status --short`）。
+- 会话标题：**仅当 `/cmd` 是对话第一个动作时**，用命令本身命名会话（见「会话标题规则」）。
 - 历史回放：卡片从 `command/run` + `command/done` 折叠出的 `CommandNode` 重建，重开会话/刷新后仍在。
 
 ## 使用
@@ -52,6 +56,42 @@ DeepSeek Harness（dsh）插件：在输入框输入 `/cmd <终端命令>`，**�
 | 取消 | 命令执行绑定 UI 请求的取消信号；被取消时不向模型发送任何内容 |
 | 会话标题 | 执行前用命令命名当前会话（见下节） |
 | 权限 / 沙箱 | 默认以 `danger-full-access` 运行（等价终端，见「权限与运行环境」） |
+
+### 交互终端模式（裸 `/cmd`）
+
+只输入 `/cmd` 并回车（**不带命令**），输入框上方会打开一个交互终端面板：
+
+```
+┌ 交互终端   cwd /Users/me/project                      [就绪] [关闭] ┐
+│ $ git status --short                                                 │
+│  M src/App.tsx                                                       │
+│ $ ls                                                                 │
+│ src  package.json                                                    │
+└──────────────────────────────────────────────────────────────────────┘
+  $ [输入命令…]                                   [发送给模型 (Ctrl+Enter)]
+  Enter 执行 · Ctrl+C 中断 · Ctrl+Enter 发送给模型 · Esc 关闭
+```
+
+| 快捷键 | 行为 |
+| --- | --- |
+| `Enter` | 执行当前输入行，输出追加到终端滚动区 |
+| `Ctrl+C` | 命令执行中 → 中断（abort）；空闲时清空输入行 |
+| `Ctrl+Enter` | 把整段终端内容作为对话输入发给模型（并结束本次终端） |
+| `Esc` | 关闭面板（未发送的内容丢弃） |
+
+终端内行为：
+
+- 每条命令通过 `ctx.shell` 执行，与 `/cmd <命令>` 一样是 `danger-full-access`（等价终端），受 120s 超时与 256 KiB 单流上限保护；
+- `cd` 单独处理并跨命令保留当前目录；`export NAME=VALUE` / `unset NAME` 会影响后续命令；
+- 输出按行保存在有界滚动区（最多 1200 行 / 96 KiB），只适合**按行执行**的命令；
+  全屏交互程序（vim、top、需要 TTY 的程序）不支持；长命令执行期间显示「执行中…」；
+- `Ctrl+Enter` 后模型收到「用户在一个交互终端里执行了这些命令」的说明 + cwd + 完整 transcript；
+  这次发送如果发生在对话开头，同样会用第一条命令命名会话；
+- 面板按会话隔离；切换会话会自动关闭当前面板的显示（未发送的终端状态随会话保留，直到关闭/发送）。
+
+底层实现：Host 注册 `POST /cmd-terminal/rpc`（`terminal.js`，经 `webServer.register` + `connection` 认证栅栏），
+浏览器半端在 `conversation.input.dock` 槽位渲染面板；裸 `/cmd` 的 `CommandResult.text` 只含一个
+`[[dsh-shell-cmd:terminal]]` 标记，命令行卡片对这类结果不渲染。
 
 ### 会话标题规则
 
@@ -144,11 +184,12 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
 ## 架构
 
 ```
+方式 A：/cmd <cmd>（一次性）
 用户输入 /cmd <cmd>
         │
         ▼
 [Host] commands 服务解析并调用 handler
-        │  0. ctx.sessionTitle.rename(session, 命令)          ← 侧边栏会话名立即更新
+        │  0. （对话开头才）ctx.sessionTitle.rename(session, 命令)
         │  1. ctx.shell.resolve / execute（cwd=会话工作目录，前台等待，带超时与取消）
         │  2. 组装正文：stdout + [stderr] + 状态标记
         │  3. agent.followup(user 消息：命令 + cwd + exit + 输出) ← 模型据此回复
@@ -157,14 +198,26 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
         │
         ▼
 [Client] conversation.chat.commandview，key = "cmd"  →  终端卡片
+
+方式 B：裸 /cmd（交互终端）
+裸 /cmd ──[Host]──> CommandResult.text = "[[dsh-shell-cmd:terminal]]"
+        │
+        ▼
+[Client] commandview 看到标记 → 打开 conversation.input.dock 面板
+        │  Enter → POST /cmd-terminal/rpc { method:"send", text } → ctx.shell 执行
+        │  Ctrl+C → { method:"cancel" }；Esc → { method:"close" }
+        │  Ctrl+Enter → { method:"finish" }
+        ▼
+[Host terminal.js] 读滚动区 → agent.followup(transcript) → 终端状态删除
 ```
 
 关键契约：
 
-- Host 半端导出 `{ name, inject, apply }`，`inject = ['commands', 'shell', 'workingDirectory']`；缺失任一服务时插件保持 inactive 而不是抛错。`sessionTitle` 为可选服务（`ctx.get`），缺失时只跳过命名。
+- Host 半端导出 `{ name, inject, apply }`，`inject = ['commands', 'shell', 'workingDirectory']`；缺失任一服务时插件保持 inactive 而不是抛错。`sessionTitle` / `webServer` / `connection` / `agents` 均为可选服务（`ctx.get`），缺失时只降级对应能力。
 - **不静态 import 任何 `@deepseek-ai/*` 核心包**：本地链接安装的插件在工作区内无法解析 dsh 安装内的包。UserMessage 按 `createUserMessage()` 的等价结构就地构造（`id` / `role` / `content` / `source`）。
 - Client 半端是 `window.__ModuleLoader__` 的懒工厂 classic script，只能 `require('react')`，无 JSX；样式经 `<style data-plugin-css>` 注入并在 `ctx.effect` 中清理。
-- 卡片注册在 `conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点），不替换任何内置渲染器。
+- 卡片注册在 `conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点），不替换任何内置渲染器；终端面板注册在 `conversation.input.dock`。
+- 终端 RPC 由 Host 通过 `webServer.register({ kind:'exact', path:'/cmd-terminal/rpc' })` 暴露，并用 `connection.requestRejection` 做认证栅栏；浏览器半端只做同源 `fetch`。
 - 所有颜色走 `--dsw-alias-*` 主题令牌，明暗主题与主题切换自动跟随。
 
 ### 模型看到的输入（示意）
@@ -209,9 +262,11 @@ npm run verify  # check + test
 - 会话全空的“新会话”在第一条命令时可能先记录 `command/run` 再激活会话；卡片随会话激活出现（与内置命令行一致）。
 - 会话标题一旦由 `/cmd` 写入即为显式标题（user pin），之后不会再被自动标题改写；不想要这个行为时用 `nameSession: false`。
 - 输出上限是为了保护会话日志与模型上下文；需要完整输出时请改用重定向到文件再 `/cmd cat <file>`。
-- 不提供 shell 持久化：每次 `/cmd` 都是独立的 `bash -c` 会话，`cd` 不会跨调用保留。
+- 一次性 `/cmd <命令>` 是独立的 `bash -c`，`cd` 不跨调用保留；交互终端模式会保留 cwd 与 `export` 的变量，但不保留 shell 函数/别名/后台进程。
+- 交互终端是**按行执行**的 REPL：全屏 TUI（vim/top/需要真 TTY 的程序）不支持；长命令执行期间面板显示「执行中…」，完成后一次性显示输出；`Ctrl+C` 只能中断由插件发起的那次命令。
+- 交互终端发送后模型收到的是滚动区快照（最多 1200 行 / 96 KiB，模型侧再截断到 24k 字符）；发送完成即结束该终端会话。
 - 不加载交互式 shell rc，环境变量来自 DSH 进程而非你的终端；`TERM=dumb` 等覆盖也不适合全屏交互程序。
-- 默认 `danger-full-access` 意味着 `/cmd` 与终端一样能写任意路径、访问网络；介意这一点时用 `useSessionPolicy: true` 退回会话沙箱。
+- 默认 `danger-full-access` 意味着 `/cmd`（含交互终端）与终端一样能写任意路径、访问网络；介意这一点时用 `useSessionPolicy: true` 退回会话沙箱。
 
 ## License
 

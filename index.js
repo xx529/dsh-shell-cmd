@@ -20,6 +20,13 @@
  * @module dsh-shell-cmd
  */
 
+import {
+  OPEN_MARKER,
+  TERMINAL_ROUTE,
+  createTerminalRegistry,
+  createTerminalRpcHandler,
+} from './terminal.js'
+
 /** Host 插件名（与包名一致，便于日志定位）。 */
 export const name = 'dsh-shell-cmd'
 
@@ -306,6 +313,29 @@ export function resolveShellSandboxPolicy(ctx, agent, workdir, options = {}) {
   }
 }
 
+/** 读取可选服务（缺失返回 undefined，不抛错）。 */
+function optionalService(ctx, name) {
+  try {
+    return typeof ctx?.get === 'function' ? ctx.get(name) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 交互终端模式是否可用：需要 `webServer`（注册 RPC 路由）、`connection`（认证栅栏）
+ * 与 `agents`（按 sessionId 找 Agent）。三者缺一时裸 `/cmd` 仍返回用法错误。
+ * @param {any} ctx Host 插件上下文
+ * @returns {boolean}
+ */
+export function isTerminalModeAvailable(ctx) {
+  return (
+    optionalService(ctx, 'webServer') !== undefined &&
+    optionalService(ctx, 'connection') !== undefined &&
+    optionalService(ctx, 'agents') !== undefined
+  )
+}
+
 /**
  * 执行一条命令并返回结果。
  * @param {any} ctx 插件上下文
@@ -313,7 +343,7 @@ export function resolveShellSandboxPolicy(ctx, agent, workdir, options = {}) {
  * @param {string} command 命令原文
  * @param {AbortSignal} [signal] 调用方取消信号
  * @param {number} [timeoutMs] 超时
- * @param {{ useSessionPolicy?: boolean }} [options] 沙箱策略选项
+ * @param {{ useSessionPolicy?: boolean, env?: Record<string, string> }} [options] 沙箱策略 / 额外环境变量
  * @returns {Promise<{ result: object, cwd: string }>}
  */
 export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_TIMEOUT_MS, options = {}) {
@@ -325,6 +355,7 @@ export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_
     stdoutMaxBytes: STDOUT_MAX_BYTES,
     onExpiry: 'kill',
     sandboxPolicy: resolveShellSandboxPolicy(ctx, agent, workdir, options),
+    ...(options.env === undefined ? {} : { env: options.env }),
     ...(signal === undefined ? {} : { signal }),
   })
   const execution = await ctx.shell.execute(spec)
@@ -333,6 +364,11 @@ export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_
 
 /**
  * `/cmd` 的处理逻辑（与注册分离，便于测试）。
+ *
+ * - `/cmd <命令>`：执行并把命令与输出发给模型（原行为）。
+ * - 裸 `/cmd`：返回 `OPEN_MARKER`，浏览器半端据此在输入框上方打开交互终端；
+ *   终端内的命令与 Ctrl+Enter 发送由 `/cmd-terminal/rpc` 处理。
+ *
  * @param {any} ctx 插件上下文
  * @param {{ agent: any, rawInput: string, signal: AbortSignal }} invocation 命令调用
  * @param {{ timeoutMs?: number, maxOutputChars?: number, nameSession?: boolean, useSessionPolicy?: boolean, createMessage?: (text: string, command: string) => any }} [options]
@@ -347,7 +383,10 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
   const createMessage =
     typeof options.createMessage === 'function' ? options.createMessage : createShellCommandMessage
   const command = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
-  if (command.length === 0) return { kind: 'error', text: USAGE }
+  if (command.length === 0) {
+    // 裸 `/cmd`：打开交互终端（需要浏览器半端与 web 服务）。
+    return isTerminalModeAvailable(ctx) ? { kind: 'success', text: OPEN_MARKER } : { kind: 'error', text: USAGE }
+  }
 
   // 用命令命名会话（在开始执行前就生效，侧边栏立即可见）。
   if (options.nameSession !== false) syncSessionTitle(ctx, invocation.agent, command)
@@ -382,7 +421,7 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
 }
 
 /**
- * 注册 `/cmd`。
+ * 注册 `/cmd` 与交互终端 RPC。
  * @param {any} ctx 插件上下文
  * @param {any} [config] 行配置（可选 timeoutMs / maxOutputChars / nameSession / useSessionPolicy）
  */
@@ -393,10 +432,37 @@ export function apply(ctx, config = {}) {
     ...(config?.nameSession === false ? { nameSession: false } : {}),
     ...(config?.useSessionPolicy === true ? { useSessionPolicy: true } : {}),
   }
+
+  // 交互终端：状态与 RPC（浏览器半端通过 POST /cmd-terminal/rpc 驱动）。
+  const registry = createTerminalRegistry(ctx, {
+    runShell,
+    syncSessionTitle,
+    createShellCommandMessage,
+    clipText,
+  })
+  ctx.effect(() => () => registry.dispose(), 'dsh-shell-cmd: terminal registry')
+
+  const webServer = optionalService(ctx, 'webServer')
+  const connection = optionalService(ctx, 'connection')
+  if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
+    const handler = createTerminalRpcHandler({
+      registry,
+      authReject:
+        connection !== undefined && connection !== null && typeof connection.requestRejection === 'function'
+          ? (req) => connection.requestRejection({ headers: req.headers })
+          : undefined,
+      logger: ctx.logger,
+    })
+    ctx.effect(
+      () => webServer.register({ kind: 'exact', path: TERMINAL_ROUTE, handler }),
+      'dsh-shell-cmd: terminal rpc route',
+    )
+  }
+
   ctx.commands.register({
     name: 'cmd',
-    description: 'Run a shell command, then send the command and its output to the model',
-    input: { hint: ' <shell command>' },
+    description: 'Run a shell command, or open an interactive terminal with Ctrl+Enter handoff',
+    input: { hint: ' <shell command>（留空打开交互终端）' },
     handler: (invocation) => executeShellCommand(ctx, invocation, options),
   })
 }

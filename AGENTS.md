@@ -11,14 +11,15 @@
 - 用户在输入框输入 `/cmd <终端命令>`；
 - Host 先执行命令，把「命令 + cwd + 退出码 + stdout/stderr」作为一条 user 消息交给模型；
 - 对话里把这次输入渲染成**终端卡片**（`conversation.chat.commandview`，key=`cmd`）；
-- 仅在对话第一个动作时用**命令本身**命名当前会话（`ctx.sessionTitle.rename`）。
+- 仅在对话第一个动作时用**命令本身**命名当前会话（`ctx.sessionTitle.rename`）；
+- 裸 `/cmd` 打开交互终端：逐条执行命令，Ctrl+Enter 把终端内容发给模型。
 
 对标 Claude Code 的 `!<command>`，但会显式把结果交给模型并要求回复。插件是**纯插件**：不 patch dsh、不写 `app.asar`。
 
 ## 2. 快速命令
 
 ```bash
-npm run check    # node --check index.js && node --check client.js
+npm run check    # node --check index.js && node --check client.js && node --check terminal.js
 npm test         # node --test "tests/**/*.test.mjs"
 npm run verify   # check + test（提交前必须通过）
 
@@ -40,13 +41,15 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 | 路径 | 作用 |
 | --- | --- |
-| `index.js` | **Host 半端**：`/cmd` 命令注册、shell 执行、正文组装、`agent.followup()`、会话标题同步 |
-| `client.js` | **Client 半端**：`window.__ModuleLoader__` 懒工厂；终端卡片 + 输入框「终端命令模式」提示条 |
+| `index.js` | **Host 半端**：`/cmd` 命令注册、shell 执行、正文组装、`agent.followup()`、会话标题同步、终端 RPC 路由装配 |
+| `terminal.js` | **交互终端 Host 逻辑**：按行 REPL、cwd/export 保持、transcript 组装、`/cmd-terminal/rpc` handler |
+| `client.js` | **Client 半端**：`window.__ModuleLoader__` 懒工厂；终端卡片、`/cmd` 模式提示条、交互终端面板（`conversation.input.dock`） |
 | `cordis.patch.yml` | bundle patch：插入一行 Host 插件（`include:shell-cmd`） |
 | `package.json` | bundle 声明（`dsh.bundle.patch`）、`dsh.client` 声明、`exports`/`files` |
 | `locale/{en,zh}.json` | 插件管理页的 `meta.title` / `meta.description` |
 | `icon.svg` | 插件图标（原创，≤256 KiB） |
-| `tests/command.test.mjs` | Host 半端单测（伪 ctx/agent/shell，不 spawn、不联网） |
+| `tests/command.test.mjs` | `/cmd` 命令、标题、沙箱、apply 单测（伪 ctx/agent/shell） |
+| `tests/terminal.test.mjs` | 终端注册表与 RPC handler 单测（伪 runShell/req/res，不 spawn、不联网） |
 | `scripts/publish-install.sh` | 推送 + 仓库安装 + 校验脚本 |
 | `README.md` | 面向用户的功能/安装/边界说明 |
 
@@ -89,6 +92,12 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 默认（人类命令）→ 显式 `{ mode: 'danger-full-access', workspaceRoot, sessionId }`，见 `resolveShellSandboxPolicy()`；
    - `useSessionPolicy: true` → 用 `ctx.sandboxPolicy.resolve({ session })`，与模型 bash 工具同边界；
    - 环境变量由 `dsh-bash-local` 决定：`bash -c` + 进程 env + `NO_COLOR/TERM=dumb/PAGER=cat/GIT_PAGER=cat` 覆盖，不加载用户 shell rc。改这一块前先读该包。
+10. **交互终端（裸 `/cmd`）**：
+   - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`），commandview 看到标记后打开 `conversation.input.dock` 面板；卡片本身不渲染。
+   - RPC：`POST /cmd-terminal/rpc` 由 `webServer.register({kind:'exact'})` 提供，必须用 `connection.requestRejection({headers})` 做认证栅栏；客户端只做同源 `fetch`。
+   - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
+   - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。
+   - 限制：按行 REPL，不支持全屏 TUI / 真 TTY；不要把它改成 `ctx.terminals`（PTY 受会话沙箱限制，与人类命令的 danger-full-access 语义冲突）。
 
 ## 5. 修改指南
 
@@ -101,8 +110,8 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 77 例全绿）。
-- Host 新逻辑必须补 `tests/command.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`，不得 spawn 真进程或联网。
+- 提交前：`npm run check && npm test`（当前 107 例全绿）。
+- Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`req`/`res`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`。
 - 无浏览器控制时，视觉只能人工确认：如实报告“插槽已注册、视觉未验证”，不要用 mock 页面/截图工具伪造验证。
@@ -139,6 +148,9 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 | 会话名不变 | 预期行为：仅“对话刚开始的第一次 `/cmd`”命名会话；对话中途、第二次 `/cmd`、已有标题/活动时都不改名。检查 `sessionTitle` 服务与 `nameSession` 配置 |
 | `/cmd` 报 `Operation not permitted` / `cannot open .git/FETCH_HEAD` | 沙箱策略被部署默认值接管：确认 `shell.resolve` 请求里带 `mode: 'danger-full-access'`（`resolveShellSandboxPolicy`）；见第 4 节第 9 条 |
 | 环境变量与终端不一致 | 已知设计：`bash -c` + DSH 进程 env，不加载 shell rc；用 `zsh -lc '…'` / 显式 `source` 兜底 |
+| 裸 `/cmd` 不打开终端面板 | 确认端口同源 fetch 成功（`/cmd-terminal/rpc` 返回 200）；客户端是否刷新；`conversation.input.dock` occupant 是否存在 |
+| 终端 RPC 401/403 | `webServer` 未注册路由或 `connection.requestRejection` 拒绝；检查 `isTerminalModeAvailable` 与页面认证 |
+| 终端面板打开但命令无输出 | 看 Host 返回的 error（busy/session-not-found）；确认 `agents.get(sessionId)` 能解析到活 Agent |
 | 安装后缺文件 | `package.json` 的 `files` 是否覆盖新增文件；仓库安装按 `files` 打包 |
 | 插件行 active 但命令报错 | Host 侧 `apply` 抛错会被回滚；看 `.plugin-manager/logs` 或重载后的 fiber 状态 |
 
@@ -146,4 +158,4 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 - 用 Conventional Commits 前缀（`feat:` / `fix:` / `docs:` / `chore:` / `refactor:` / `test:`），中文描述可读即可。
 - 一次提交聚焦一件事；`npm run verify` 通过后再提交。
-- 运行时代码（`index.js`/`client.js`/`locale`/`icon`/patch）与文档/测试可以分开提交，但**不要提交未通过 verify 的版本**。
+- 运行时代码（`index.js`/`terminal.js`/`client.js`/`locale`/`icon`/patch）与文档/测试可以分开提交，但**不要提交未通过 verify 的版本**。
