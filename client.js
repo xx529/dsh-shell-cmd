@@ -856,9 +856,12 @@ window.__ModuleLoader__.load({
             : ''
       const open = useTerminalOpen(sessionId)
       const fastUntilRef = React.useRef(0)
-      const claimName = props.input?.claim?.name
-      const phase = props.input?.phase
-      const draft = typeof props.input?.draft === 'string' ? props.input.draft : ''
+      // `conversation.composer.dock` 不提供 ownerProps，输入状态要从 standard prop
+      // `useInput` 里取（InputState: { draft, phase, claim, ... }）。
+      const useInput = typeof props.useInput === 'function' ? props.useInput : null
+      const claimName = useInput === null ? '' : useInput((state) => (typeof state?.claim?.name === 'string' ? state.claim.name : ''))
+      const phase = useInput === null ? '' : useInput((state) => (typeof state?.phase === 'string' ? state.phase : ''))
+      const draft = useInput === null ? '' : useInput((state) => (typeof state?.draft === 'string' ? state.draft : ''))
 
       // 命令刚被认领（/cmd 被选为命令）且还没有参数时就立刻打开面板：
       // 这样第一次回车（菜单确认/提交）后终端就出现，不必再按一次。
