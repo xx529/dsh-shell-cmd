@@ -386,18 +386,21 @@ window.__ModuleLoader__.load({
       const [expanded, setExpanded] = React.useState(false)
       const [copyState, setCopyState] = React.useState('idle')
 
-      // 裸 /cmd 的 CommandResult 只用来打开交互终端：卡片本身不渲染；
-      // 只在“刚发生”时触发，避免回放历史记录时误开终端。
-      const opensTerminal =
+      // 裸 /cmd 的 CommandResult 只用来打开交互终端：**任何**这种结果都不渲染卡片
+      // （否则按 Esc 关闭终端后，对话记录里会留下一条奇怪的 cmd 卡片）。
+      // 只有“刚发生”的结果才触发打开，避免回放历史时误开终端。
+      const isTerminalResult =
         args.trim().length === 0 &&
         typeof outcome?.text === 'string' &&
-        outcome.text.startsWith(TERMINAL_MARKER) &&
+        outcome.text.startsWith(TERMINAL_MARKER)
+      const opensTerminal =
+        isTerminalResult &&
         typeof node.time === 'number' &&
         Date.now() - node.time < TERMINAL_OPEN_FRESH_MS
       React.useEffect(() => {
         if (opensTerminal) setTerminalOpen(props.sessionId, true)
       }, [opensTerminal, props.sessionId, node.seq])
-      if (opensTerminal) return null
+      if (isTerminalResult) return null
 
       const t = typeof props.t === 'function' ? props.t : null
       const tr = (key, params) => {
@@ -564,11 +567,11 @@ window.__ModuleLoader__.load({
     // 交互终端：打开状态（按 session）、RPC 客户端与面板
     // ------------------------------------------------------------------
 
-    /**
-     * 共享 `/api` 桥上的相对路径（无前导斜杠：Desktop 的 dsh-app 页面也命中）。
-     * Host 侧用 `connection.fetch.register({ path: 'cmd-terminal/rpc' })` 提供。
-     */
-    const TERMINAL_RPC = 'api/cmd-terminal/rpc'
+    /** 自定义 RPC 通道（与 terminal.js 的 TERMINAL_RPC_CHANNEL / ENDPOINT 一致）。 */
+    const TERMINAL_RPC_CHANNEL = '/cmd-terminal'
+    const TERMINAL_RPC_ENDPOINT = 'rpc'
+    /** Client 侧 `ctx.get('connection').rpc`（Web/Electron 都由 connection 处理）。 */
+    let terminalClientRpc = null
     /** 裸 /cmd 的打开标记（与 terminal.js 的 OPEN_MARKER 一致）。 */
     const TERMINAL_MARKER = '[[dsh-shell-cmd:terminal]]'
     /** 只对“刚发生”的命令行打开终端，避免回放历史时误触发。 */
@@ -606,25 +609,17 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(subscribe, getSnapshot)
     }
 
-    /** 调用 Host 的终端 RPC（共享 `/api` 精确路由，相对页面 base 解析）。 */
+    /** 调用 Host 的终端 RPC（自定义 connection RPC 通道）。 */
     async function terminalRpc(sessionId, method, params) {
+      if (terminalClientRpc === null) throw new Error('terminal: connection rpc is unavailable')
       const payload = { method, params: { sessionId, ...(params ?? {}) } }
-      const response = await fetch(TERMINAL_RPC, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      let json = null
-      try {
-        json = await response.json()
-      } catch {
-        json = null
-      }
-      if (json === null || json.ok !== true) {
-        const message = json?.error?.message ?? `HTTP ${response.status}`
+      const result = await terminalClientRpc.call(TERMINAL_RPC_CHANNEL, TERMINAL_RPC_ENDPOINT, payload)
+      if (result === null || typeof result !== 'object') throw new Error('terminal: empty rpc result')
+      if (result.ok !== true) {
+        const message = result.error?.message ?? result.error?.code ?? 'terminal rpc failed'
         throw new Error(message)
       }
-      return json.value
+      return result.value
     }
 
     /** 与卡片一致的翻译函数（带英文兜底）。 */
@@ -858,6 +853,14 @@ window.__ModuleLoader__.load({
       const fastUntilRef = React.useRef(0)
       const claimName = props.input?.claim?.name
       const phase = props.input?.phase
+      const draft = typeof props.input?.draft === 'string' ? props.input.draft : ''
+
+      // 命令刚被认领（/cmd 被选为命令）且还没有参数时就立刻打开面板：
+      // 这样第一次回车（菜单确认/提交）后终端就出现，不必再按一次。
+      React.useEffect(() => {
+        if (open || sessionId.length === 0) return
+        if (claimName === 'cmd' && draft.trim() === '/cmd') setTerminalOpen(sessionId, true)
+      }, [open, sessionId, claimName, draft])
 
       // 刚提交过 /cmd 时快速轮询（180ms），其余时间低频兜底（1.2s）。
       React.useEffect(() => {
@@ -897,6 +900,14 @@ window.__ModuleLoader__.load({
      * @param {any} ctx 插件根上下文（inject: slots / locale）
      */
     function apply(ctx) {
+      try {
+        const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
+        const rpc = connection !== undefined && connection !== null ? connection.rpc : undefined
+        terminalClientRpc =
+          rpc !== undefined && rpc !== null && typeof rpc.call === 'function' ? rpc : null
+      } catch {
+        terminalClientRpc = null
+      }
       ctx.effect(() => insertStyle(), 'dsh-shell-cmd: card styles')
       let translate = null
       try {
@@ -933,12 +944,12 @@ window.__ModuleLoader__.load({
 
       const TerminalEntry = (props) => h(TerminalDock, translate === null ? props : { ...props, t: translate })
       TerminalEntry.displayName = 'DshShellCmdTerminal'
-      ctx.slots.inject('conversation.input.dock', () =>
+      ctx.slots.inject('conversation.composer.dock', () =>
         ctx.slots.register(
           {
-            name: 'conversation.input.dock',
+            name: 'conversation.composer.dock',
             id: 'shell-cmd-terminal',
-            order: 10,
+            order: 5,
           },
           TerminalEntry,
         ),

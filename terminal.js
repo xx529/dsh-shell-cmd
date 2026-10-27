@@ -21,8 +21,11 @@ export const OPEN_MARKER = '[[dsh-shell-cmd:terminal]]'
 /** 浏览器半端与 Host 之间的固定 HTTP RPC 路径。 */
 export const TERMINAL_ROUTE = '/cmd-terminal/rpc'
 
-/** 共享 `/api` RPC 通道上的端点名（Desktop 的 dsh-app 页面只能走这条通道）。 */
-export const TERMINAL_RPC_ENDPOINT = 'cmd-terminal/rpc'
+/** 自定义 RPC 通道（`connection.rpc.handle` 注册，`connection.rpc.call` 调用）。 */
+export const TERMINAL_RPC_CHANNEL = '/cmd-terminal'
+
+/** 该通道上的端点名。 */
+export const TERMINAL_RPC_ENDPOINT = 'rpc'
 
 /** 滚动区上限：行数与字符数（超出丢最旧的行）。 */
 const MAX_LINES = 1200
@@ -567,32 +570,3 @@ export function createTerminalRpcResponder(registry) {
   }
 }
 
-/**
- * 创建挂到 `ctx.connection.fetch` 的 `/api` 精确路由（path 为 `cmd-terminal/rpc`）。
- * 浏览器半端用相对地址 `api/cmd-terminal/rpc` 调用；Desktop 的 dsh-app 页面会把它
- * 代理到 Host 的共享 `/api` 桥，天然带认证且不受页面 origin 限制。
- *
- * @param {any} registry `createTerminalRegistry()` 的返回值
- * @returns {(request: Request) => Promise<Response>}
- */
-export function createTerminalFetchRoute(registry) {
-  return async function terminalFetchRoute(request) {
-    let body = null
-    try {
-      body = await request.json()
-    } catch {
-      body = null
-    }
-    const box = paramsOf(body)
-    const method = typeof box.method === 'string' ? box.method : ''
-    if (method.length === 0) {
-      return Response.json(fail('bad-request', 'method is required'), {
-        status: 400,
-        headers: { 'cache-control': 'no-store' },
-      })
-    }
-    const result = await dispatch(registry, method, paramsOf(box.params))
-    const status = result.ok === true ? 200 : (STATUS_BY_CODE[result.error?.code] ?? 500)
-    return Response.json(result, { status, headers: { 'cache-control': 'no-store' } })
-  }
-}

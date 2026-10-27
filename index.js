@@ -23,9 +23,10 @@
 import {
   OPEN_MARKER,
   TERMINAL_ROUTE,
+  TERMINAL_RPC_CHANNEL,
   createTerminalRegistry,
   createTerminalRpcHandler,
-  createTerminalFetchRoute,
+  createTerminalRpcResponder,
 } from './terminal.js'
 
 /** Host 插件名（与包名一致，便于日志定位）。 */
@@ -331,12 +332,12 @@ function optionalService(ctx, name) {
  */
 export function isTerminalModeAvailable(ctx) {
   const connection = optionalService(ctx, 'connection')
-  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
+  const rpc = connection === undefined || connection === null ? undefined : connection.rpc
   return (
     optionalService(ctx, 'agents') !== undefined &&
-    fetchRoutes !== undefined &&
-    fetchRoutes !== null &&
-    typeof fetchRoutes.register === 'function'
+    rpc !== undefined &&
+    rpc !== null &&
+    typeof rpc.handle === 'function'
   )
 }
 
@@ -458,21 +459,14 @@ export function apply(ctx, config = {}) {
   const webServer = optionalService(ctx, 'webServer')
   const connection = optionalService(ctx, 'connection')
 
-  // 首选传输：`connection.fetch` 的精确 `/api` 路由。浏览器半端用相对地址
-  // `api/cmd-terminal/rpc`；Desktop 的 dsh-app 页面会经共享 `/api` 桥代理并认证。
-  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
-  if (fetchRoutes !== undefined && fetchRoutes !== null && typeof fetchRoutes.register === 'function') {
-    const route = createTerminalFetchRoute(registry)
-    ctx.effect(
-      () =>
-        fetchRoutes.register({
-          path: '/api/cmd-terminal/rpc',
-          methods: ['POST'],
-          requestBody: 'buffered',
-          fetch: route,
-        }),
-      'dsh-shell-cmd: terminal /api fetch route',
-    )
+  // 首选传输：自定义 RPC 通道 `/cmd-terminal`。Client 用
+  // `ctx.get('connection').rpc.call('/cmd-terminal','rpc',payload)`；
+  // Host 用 `connection.rpc.handle` 注册，Electron/Web 两种 carrier 都由
+  // connection 自己处理（Electron 走 IPC 桥，不会出现页面 origin 的 404/405）。
+  const rpc = connection === undefined || connection === null ? undefined : connection.rpc
+  if (rpc !== undefined && rpc !== null && typeof rpc.handle === 'function') {
+    const responder = createTerminalRpcResponder(registry)
+    ctx.effect(() => rpc.handle(TERMINAL_RPC_CHANNEL, responder), 'dsh-shell-cmd: terminal rpc channel')
   }
   if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
     const handler = createTerminalRpcHandler({
