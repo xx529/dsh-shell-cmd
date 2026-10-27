@@ -18,8 +18,11 @@
 /** 裸 `/cmd` 的命令结果标记：浏览器半端看到它就把输入与输出转成终端面板。 */
 export const OPEN_MARKER = '[[dsh-shell-cmd:terminal]]'
 
-/** 浏览器半端与 Host 之间的固定 RPC 路径。 */
+/** 浏览器半端与 Host 之间的固定 HTTP RPC 路径。 */
 export const TERMINAL_ROUTE = '/cmd-terminal/rpc'
+
+/** 共享 `/api` RPC 通道上的端点名（Desktop 的 dsh-app 页面只能走这条通道）。 */
+export const TERMINAL_RPC_ENDPOINT = 'cmd-terminal/rpc'
 
 /** 滚动区上限：行数与字符数（超出丢最旧的行）。 */
 const MAX_LINES = 1200
@@ -432,9 +435,9 @@ function paramsOf(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
-/** 业务错误。 */
+/** 业务错误（HTTP 与 `/api` RPC 共用；RPC 信封要求 details 字段）。 */
 function fail(code, message) {
-  return { ok: false, error: { code, ...(message === undefined ? {} : { message }) } }
+  return { ok: false, error: { code, ...(message === undefined ? {} : { message }), details: {} } }
 }
 
 /** 业务分派。 */
@@ -540,5 +543,26 @@ export function createTerminalRpcHandler(options) {
         // 对端断开
       }
     }
+  }
+}
+
+/**
+ * 创建共享 `/api` 通道上的 RPC responder（Desktop 的 dsh-app 页面通过
+ * `ctx.connection.rpc` 调用，不经过页面 origin 的 HTTP 路由）。
+ *
+ * @param {any} registry `createTerminalRegistry()` 的返回值
+ * @returns {(endpoint: string, payload: any) => Promise<any>}
+ */
+export function createTerminalRpcResponder(registry) {
+  return async function terminalRpcResponder(endpoint, payload) {
+    if (endpoint !== TERMINAL_RPC_ENDPOINT) return fail('bad-request', `unknown endpoint: ${endpoint}`)
+    let body = paramsOf(payload)
+    // 共享通道的 Remote 信封可能是 { args: {...} }；两种形态都接受。
+    if (typeof body.method !== 'string' && body.args !== undefined && body.args !== null && typeof body.args === 'object') {
+      body = paramsOf(body.args)
+    }
+    const method = typeof body.method === 'string' ? body.method : ''
+    if (method.length === 0) return fail('bad-request', 'method is required')
+    return dispatch(registry, method, paramsOf(body.params))
   }
 }

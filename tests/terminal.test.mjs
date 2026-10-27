@@ -12,9 +12,11 @@ import assert from 'node:assert/strict'
 import {
   OPEN_MARKER,
   TERMINAL_ROUTE,
+  TERMINAL_RPC_ENDPOINT,
   terminalTranscript,
   createTerminalRegistry,
   createTerminalRpcHandler,
+  createTerminalRpcResponder,
 } from '../terminal.js'
 
 // ---------------------------------------------------------------------------
@@ -393,6 +395,61 @@ describe('createTerminalRegistry', () => {
 // ---------------------------------------------------------------------------
 // HTTP RPC
 // ---------------------------------------------------------------------------
+
+describe('createTerminalRpcResponder（/api 通道）', () => {
+  it('暴露端点名常量', () => {
+    assert.equal(TERMINAL_RPC_ENDPOINT, 'cmd-terminal/rpc')
+  })
+
+  it('open / status / send / finish 通过 responder 分派', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
+    const responder = createTerminalRpcResponder(h.registry)
+
+    const opened = await responder(TERMINAL_RPC_ENDPOINT, { method: 'open', params: { sessionId: 's-1' } })
+    assert.equal(opened.ok, true)
+    assert.equal(opened.value.cwd, '/tmp/work')
+
+    h.registry.requestOpen('s-1')
+    const status = await responder(TERMINAL_RPC_ENDPOINT, { method: 'status', params: { sessionId: 's-1' } })
+    assert.deepEqual(status.value, { pendingOpen: true, open: true })
+
+    const sent = await responder(TERMINAL_RPC_ENDPOINT, { method: 'send', params: { sessionId: 's-1', text: 'echo x' } })
+    assert.equal(sent.ok, true)
+    assert.deepEqual(sent.value.lines, ['$ echo x', 'x'])
+
+    const finished = await responder(TERMINAL_RPC_ENDPOINT, { method: 'finish', params: { sessionId: 's-1' } })
+    assert.equal(finished.ok, true)
+    assert.equal(finished.value.sent, true)
+    assert.equal(h.calls.followup.length, 1)
+  })
+
+  it('未知端点 / 缺少 method / 未知方法返回 bad-request 信封（带 details）', async () => {
+    const h = makeHarness()
+    const responder = createTerminalRpcResponder(h.registry)
+
+    const wrongEndpoint = await responder('nope', { method: 'open', params: { sessionId: 's-1' } })
+    assert.equal(wrongEndpoint.ok, false)
+    assert.equal(wrongEndpoint.error.code, 'bad-request')
+    assert.deepEqual(wrongEndpoint.error.details, {})
+
+    const noMethod = await responder(TERMINAL_RPC_ENDPOINT, { params: { sessionId: 's-1' } })
+    assert.equal(noMethod.error.code, 'bad-request')
+
+    const unknown = await responder(TERMINAL_RPC_ENDPOINT, { method: 'nope', params: { sessionId: 's-1' } })
+    assert.equal(unknown.error.code, 'bad-request')
+  })
+
+  it('缺少 sessionId / 会话不存在时返回对应错误码', async () => {
+    const h = makeHarness()
+    const responder = createTerminalRpcResponder(h.registry)
+
+    const noSession = await responder(TERMINAL_RPC_ENDPOINT, { method: 'open', params: {} })
+    assert.equal(noSession.error.code, 'bad-request')
+
+    const missing = await responder(TERMINAL_RPC_ENDPOINT, { method: 'open', params: { sessionId: 'missing' } })
+    assert.equal(missing.error.code, 'session-not-found')
+  })
+})
 
 describe('createTerminalRpcHandler', () => {
   const makeHandler = (h) =>

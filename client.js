@@ -218,6 +218,10 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion: reduce) { .dsc-hint-dot { animation: none; } }
 .dsc-hint-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-term {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
   margin: 6px 0 2px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
@@ -560,8 +564,15 @@ window.__ModuleLoader__.load({
     // 交互终端：打开状态（按 session）、RPC 客户端与面板
     // ------------------------------------------------------------------
 
-    /** Host 半端注册的固定 RPC 路径（与 terminal.js 的 TERMINAL_ROUTE 一致）。 */
+    /** Host 半端注册的固定 HTTP RPC 路径（与 terminal.js 的 TERMINAL_ROUTE 一致）。 */
     const TERMINAL_RPC = '/cmd-terminal/rpc'
+    /** 共享 `/api` 通道上的端点名（与 terminal.js 的 TERMINAL_RPC_ENDPOINT 一致）。 */
+    const TERMINAL_RPC_ENDPOINT = 'cmd-terminal/rpc'
+    /**
+     * Client 侧 `ctx.connection.rpc`（Desktop 的 dsh-app 页面首选传输）。
+     * 在 `apply` 里赋值；为空时退回同源 HTTP fetch。
+     */
+    let terminalHostRpc = null
     /** 裸 /cmd 的打开标记（与 terminal.js 的 OPEN_MARKER 一致）。 */
     const TERMINAL_MARKER = '[[dsh-shell-cmd:terminal]]'
     /** 只对“刚发生”的命令行打开终端，避免回放历史时误触发。 */
@@ -599,12 +610,22 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(subscribe, getSnapshot)
     }
 
-    /** 调用 Host 的终端 RPC。 */
+    /** 调用 Host 的终端 RPC：优先共享 `/api` 通道，其次同源 HTTP。 */
     async function terminalRpc(sessionId, method, params) {
+      const payload = { method, params: { sessionId, ...(params ?? {}) } }
+      if (typeof terminalHostRpc === 'function') {
+        const response = await terminalHostRpc('/api', TERMINAL_RPC_ENDPOINT, payload)
+        if (response === null || typeof response !== 'object') throw new Error('terminal: empty rpc response')
+        if (response.ok !== true) {
+          const message = response.error?.message ?? response.error?.code ?? 'terminal rpc failed'
+          throw new Error(message)
+        }
+        return response.value
+      }
       const response = await fetch(TERMINAL_RPC, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ method, params: { sessionId, ...(params ?? {}) } }),
+        body: JSON.stringify(payload),
       })
       let json = null
       try {
@@ -847,25 +868,38 @@ window.__ModuleLoader__.load({
             ? props.session.id
             : ''
       const open = useTerminalOpen(sessionId)
+      const fastUntilRef = React.useRef(0)
+      const claimName = props.input?.claim?.name
+      const phase = props.input?.phase
+
+      // 刚提交过 /cmd 时快速轮询（180ms），其余时间低频兜底（1.2s）。
+      React.useEffect(() => {
+        if (claimName === 'cmd' || phase === 'submitting') fastUntilRef.current = Date.now() + 8000
+      }, [claimName, phase])
 
       React.useEffect(() => {
         if (open || sessionId.length === 0) return undefined
         let cancelled = false
-        const tick = async () => {
+        let timer = 0
+        const run = async () => {
+          if (cancelled) return
           try {
             const status = await terminalRpc(sessionId, 'status')
-            if (!cancelled && status !== null && status.pendingOpen === true) setTerminalOpen(sessionId, true)
+            if (!cancelled && status !== null && status.pendingOpen === true) {
+              setTerminalOpen(sessionId, true)
+              return
+            }
           } catch {
             /* 轮询失败静默；下一个周期重试 */
           }
+          if (!cancelled) timer = window.setTimeout(run, Date.now() < fastUntilRef.current ? 180 : 1200)
         }
-        const timer = window.setInterval(tick, 600)
-        void tick()
+        timer = window.setTimeout(run, Date.now() < fastUntilRef.current ? 150 : 400)
         return () => {
           cancelled = true
-          window.clearInterval(timer)
+          window.clearTimeout(timer)
         }
-      }, [open, sessionId])
+      }, [open, sessionId, claimName, phase])
 
       if (!open || sessionId.length === 0) return null
       return h(TerminalView, { sessionId, tr: makeTranslator(props.t) })
@@ -876,6 +910,15 @@ window.__ModuleLoader__.load({
      * @param {any} ctx 插件根上下文（inject: slots / locale）
      */
     function apply(ctx) {
+      try {
+        const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
+        terminalHostRpc =
+          connection !== undefined && connection !== null && typeof connection.rpc === 'function'
+            ? connection.rpc.bind(connection)
+            : null
+      } catch {
+        terminalHostRpc = null
+      }
       ctx.effect(() => insertStyle(), 'dsh-shell-cmd: card styles')
       let translate = null
       try {

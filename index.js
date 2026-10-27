@@ -23,8 +23,10 @@
 import {
   OPEN_MARKER,
   TERMINAL_ROUTE,
+  TERMINAL_RPC_ENDPOINT,
   createTerminalRegistry,
   createTerminalRpcHandler,
+  createTerminalRpcResponder,
 } from './terminal.js'
 
 /** Host 插件名（与包名一致，便于日志定位）。 */
@@ -329,10 +331,13 @@ function optionalService(ctx, name) {
  * @returns {boolean}
  */
 export function isTerminalModeAvailable(ctx) {
+  const connection = optionalService(ctx, 'connection')
+  const rpc = connection === undefined || connection === null ? undefined : connection.rpc
   return (
-    optionalService(ctx, 'webServer') !== undefined &&
-    optionalService(ctx, 'connection') !== undefined &&
-    optionalService(ctx, 'agents') !== undefined
+    optionalService(ctx, 'agents') !== undefined &&
+    rpc !== undefined &&
+    rpc !== null &&
+    typeof rpc.intercept === 'function'
   )
 }
 
@@ -453,6 +458,21 @@ export function apply(ctx, config = {}) {
 
   const webServer = optionalService(ctx, 'webServer')
   const connection = optionalService(ctx, 'connection')
+
+  // Desktop 的 dsh-app 页面不能把 POST 发到页面 origin 的任意路径，但能走共享
+  // `/api` RPC 通道；这条通道是终端的首选传输。
+  if (connection !== undefined && connection !== null && connection.rpc !== undefined) {
+    const rpc = connection.rpc
+    if (typeof rpc.intercept === 'function') {
+      const responder = createTerminalRpcResponder(registry)
+      ctx.effect(() => {
+        const off = rpc.intercept('/api', (endpoint) => endpoint === TERMINAL_RPC_ENDPOINT, responder)
+        return () => {
+          if (typeof off === 'function') Promise.resolve(off()).catch(() => {})
+        }
+      }, 'dsh-shell-cmd: terminal /api rpc')
+    }
+  }
   if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
     const handler = createTerminalRpcHandler({
       registry,
