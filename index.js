@@ -466,7 +466,7 @@ export function apply(ctx, config = {}) {
     ctx.effect(
       () =>
         fetchRoutes.register({
-          path: 'cmd-terminal/rpc',
+          path: '/api/cmd-terminal/rpc',
           methods: ['POST'],
           requestBody: 'buffered',
           fetch: route,
