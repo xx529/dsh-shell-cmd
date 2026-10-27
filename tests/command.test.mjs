@@ -209,7 +209,7 @@ function makeTitleService({ current = undefined, renameThrows = false, getThrows
 describe('模块导出', () => {
   it('导出插件名、注入服务与默认常量', () => {
     assert.equal(pluginName, 'dsh-shell-cmd')
-    assert.deepEqual(inject, ['commands', 'shell', 'workingDirectory'])
+    assert.deepEqual(inject, ['commands', 'shell', 'workingDirectory', 'webServer'])
     assert.equal(DEFAULT_TIMEOUT_MS, 120_000)
     assert.equal(DEFAULT_MAX_OUTPUT_CHARS, 24_000)
     assert.equal(STDOUT_MAX_BYTES, 256 * 1024)

@@ -32,8 +32,11 @@ import {
 /** Host 插件名（与包名一致，便于日志定位）。 */
 export const name = 'dsh-shell-cmd'
 
-/** 依赖的 Host 服务；缺失时插件保持 inactive 而不是抛错。 */
-export const inject = ['commands', 'shell', 'workingDirectory']
+/** 依赖的 Host 服务；缺失时插件保持 inactive 而不是抛错。
+ *  `webServer` 是硬依赖：`connection.rpc.handle` 会在调用方 context 上注册路由并读取
+ *  `ctx.webServer`（Cordis Service 访问绑定到调用方 context），没有 inject 会报
+ *  “cannot get property webServer without inject”。 */
+export const inject = ['commands', 'shell', 'workingDirectory', 'webServer']
 
 /** 单条命令的默认超时（毫秒）。 */
 export const DEFAULT_TIMEOUT_MS = 120_000
