@@ -389,8 +389,10 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
     typeof options.createMessage === 'function' ? options.createMessage : createShellCommandMessage
   const command = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
   if (command.length === 0) {
-    // 裸 `/cmd`：打开交互终端（需要浏览器半端与 web 服务）。
-    if (!isTerminalModeAvailable(ctx)) return { kind: 'error', text: USAGE }
+    // 裸 `/cmd`：打开交互终端（需要已注册的终端传输）。
+    const terminalReady =
+      typeof options.isTerminalReady === 'function' ? options.isTerminalReady() === true : isTerminalModeAvailable(ctx)
+    if (!terminalReady) return { kind: 'error', text: USAGE }
     // 浏览器半端有两种触发方式：commandview 看到标记（快路径）与轮询 status
     // （兜底，避免命令行卡片未渲染时打不开）。两种方式都消费同一个打开请求。
     try {
@@ -460,12 +462,16 @@ export function apply(ctx, config = {}) {
   const connection = optionalService(ctx, 'connection')
 
   // 首选传输：`connection.fetch` 的 `/api` 精确路由（参考 dsh-context）。
-  // Client 用相对地址 `api/cmd-terminal/rpc`；Web 与 Desktop 都由 connection
-  // 的 `/api` 桥处理并认证。
-  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
-  if (fetchRoutes !== undefined && fetchRoutes !== null && typeof fetchRoutes.register === 'function') {
+  // 必须通过 `ctx.inject(['connection'])` 获取：connection 可能在 web-app 的
+  // realm/子上下文里，直接 `ctx.get('connection')` 拿不到时路由就不会注册，
+  // 浏览器端表现为 404。
+  let terminalRouteReady = false
+  ctx.inject(['connection'], (child) => {
+    const service = typeof child.get === 'function' ? child.get('connection') : undefined
+    const fetchRoutes = service === undefined || service === null ? undefined : service.fetch
+    if (fetchRoutes === undefined || fetchRoutes === null || typeof fetchRoutes.register !== 'function') return
     const route = createTerminalFetchRoute(registry)
-    ctx.effect(
+    child.effect(
       () =>
         fetchRoutes.register({
           path: TERMINAL_FETCH_PATH,
@@ -475,7 +481,12 @@ export function apply(ctx, config = {}) {
         }),
       'dsh-shell-cmd: terminal /api fetch route',
     )
-  }
+    terminalRouteReady = true
+    child.effect(() => () => {
+      terminalRouteReady = false
+    }, 'dsh-shell-cmd: terminal route readiness')
+  })
+  options.isTerminalReady = () => terminalRouteReady
   if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
     const handler = createTerminalRpcHandler({
       registry,

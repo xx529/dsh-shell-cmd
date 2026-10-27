@@ -106,6 +106,14 @@ function makeHarness({
         return { result: async () => state.result }
       },
     },
+    // cordis inject：把子上下文（同一 get/effect）交给回调。
+    inject: (names, callback) => {
+      const child = {
+        get: (n) => ctx.get(n),
+        effect: (fn, label) => ctx.effect(fn, label),
+      }
+      return callback(child)
+    },
     // cordis effect：执行回调并保留其清理函数。
     effect: (callback) => {
       const cleanup = typeof callback === 'function' ? callback() : undefined
