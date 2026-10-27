@@ -1,6 +1,6 @@
 {
   "name": "dsh-shell-cmd",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "在 DSH 输入框输入 /cmd <终端命令>，先执行该命令，再把命令与输出一起发给模型，并在对话中以终端卡片样式渲染这次输入。",

@@ -11,7 +11,7 @@
 - 用户在输入框输入 `/cmd <终端命令>`；
 - Host 先执行命令，把「命令 + cwd + 退出码 + stdout/stderr」作为一条 user 消息交给模型；
 - 对话里把这次输入渲染成**终端卡片**（`conversation.chat.commandview`，key=`cmd`）；
-- 执行时用**命令本身**命名当前会话（`ctx.sessionTitle.rename`）。
+- 仅在对话第一个动作时用**命令本身**命名当前会话（`ctx.sessionTitle.rename`）。
 
 对标 Claude Code 的 `!<command>`，但会显式把结果交给模型并要求回复。插件是**纯插件**：不 patch dsh、不写 `app.asar`。
 
@@ -81,10 +81,9 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 5. **外观只走主题令牌** `--dsw-alias-*`（`bg-*`、`border-*`、`label-*`、`state-*`、`brand-primary`）。禁止字面颜色（图标/插画除外）；明暗主题必须自动跟随。
 6. **可见文案走 Client locale**：`ctx.locale.register(NS, { en, zh })` + `ctx.locale.bind(NS)`，`NS = 'dsh-shell-cmd'`。组件内必须有英文兜底，`t` 抛错不能让整张卡片崩溃。
 7. **Client 半端形态**：`window.__ModuleLoader__.load({ id: '<包名>', factory(require) { ... return { inject, apply } } })`；只能 `require('react')`，无 JSX（`React.createElement`）；样式用 `<style data-plugin-css>` 注入，并在 `ctx.effect` 的清理函数里移除；所有注册（样式、locale、slot）都放 `ctx.effect` / `ctx.slots.inject`，卸载时自动撤销。
-8. **会话标题**：`ctx.sessionTitle.rename()` 以 `source:'user'` **固定**标题，之后自动标题不再覆盖。按 `session/title` 事件 seq 记录「本插件写过的那一次」：
-   - 无标题 / 自动标题 → 写入命令；
-   - 本插件写过 → 更新为最新命令；
-   - 人工改过（`source.kind==='user'` 且 seq 不匹配）→ **不要覆盖**。
+8. **会话标题只在对话开始时设置**：`ctx.sessionTitle.rename()` 以 `source:'user'` **固定**标题，之后自动标题不再覆盖。`syncSessionTitle()` 只在 `isConversationStart()` 为 true 时改名：
+   - 会话无任何标题，且日志无 `user/message` / `turn/start`，且 inbox 无待处理输入 → 写入命令；
+   - 对话中途（已有标题或已有对话活动）、同一会话第二次 `/cmd`、fork/续接会话 → **不改标题**，命令照常执行。
    没有 `sessionTitle` 服务时静默跳过；`nameSession:false` 可关闭。
 9. **shell 沙箱策略必须显式传**，不能靠“不传 `sandboxPolicy`”来表示不沙箱：`@deepseek-ai/dsh-bash-sandbox` 的 `resolve()` 会把缺省值补成**部署默认策略**（`ctx.sandboxPolicy.resolve()`，不带 session），于是命令会跑在部署默认的 workspace root / 模式下（典型症状：`/cmd git pull` 报 `.git/FETCH_HEAD: Operation not permitted`）。
    - 默认（人类命令）→ 显式 `{ mode: 'danger-full-access', workspaceRoot, sessionId }`，见 `resolveShellSandboxPolicy()`；
@@ -102,7 +101,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 68 例全绿）。
+- 提交前：`npm run check && npm test`（当前 77 例全绿）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`。
@@ -137,7 +136,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 | `/cmd` 不在命令菜单 | `plugin_manager list_plugins` 看 `include:shell-cmd` 是否 `active`；`Config.listConfigs name=dsh-shell-cmd` |
 | 卡片不出现、显示通用命令行 | `Slots.listSubTree root=conversation.chat.commandview` 是否有 `key=cmd`；页面是否刷新过 |
 | 卡片空白/崩溃 | 浏览器控制台 `slot entry crashed in 'conversation.chat.commandview'`；检查 `props.node` 防御与 locale 兜底 |
-| 会话名不变 | 该会话是否被人工改过名（尊重用户）；`sessionTitle` 服务是否存在；`nameSession` 配置 |
+| 会话名不变 | 预期行为：仅“对话刚开始的第一次 `/cmd`”命名会话；对话中途、第二次 `/cmd`、已有标题/活动时都不改名。检查 `sessionTitle` 服务与 `nameSession` 配置 |
 | `/cmd` 报 `Operation not permitted` / `cannot open .git/FETCH_HEAD` | 沙箱策略被部署默认值接管：确认 `shell.resolve` 请求里带 `mode: 'danger-full-access'`（`resolveShellSandboxPolicy`）；见第 4 节第 9 条 |
 | 环境变量与终端不一致 | 已知设计：`bash -c` + DSH 进程 env，不加载 shell rc；用 `zsh -lc '…'` / 显式 `source` 兜底 |
 | 安装后缺文件 | `package.json` 的 `files` 是否覆盖新增文件；仓库安装按 `files` 打包 |

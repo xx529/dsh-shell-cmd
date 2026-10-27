@@ -165,9 +165,6 @@ export function createShellCommandMessage(text, command) {
   }
 }
 
-/** 记录每个会话中「本插件写入的标题事件 seq」，用于区分自动标题 / 人工改名。 */
-const titledSessions = new WeakMap()
-
 /**
  * 把命令整理成适合做会话标题的一行文本（标题服务还会做字节截断与清理）。
  * @param {string} command 命令原文
@@ -179,16 +176,49 @@ export function titleFromCommand(command) {
 }
 
 /**
- * 用命令名命名当前会话。
+ * 判断当前是否处于「对话刚开始」：
+ * 1. 会话还没有任何标题（人工命名或自动生成都算已有）；
+ * 2. 会话日志里没有任何对话活动（`user/message` / `turn/start`）。
  *
- * 规则（避免覆盖用户手动改的名字）：
- * - 尚无标题：写入命令；
- * - 标题来自自动生成（`fallback` / `provider`）：写入命令；
- * - 标题是本插件之前写入的（按 `session/title` 事件 seq 判断）：更新为最新命令；
- * - 标题是用户手动改的（`source.kind === 'user'` 且不是本插件写入）：保持不动。
+ * 只看标题不够：自动标题可能尚未生成；只看活动不够：空白会话。
+ * 两者同时满足才算开始——这样对话中途执行的 `/cmd` 不会改标题，
+ * 而被 fork/续接、已继承历史消息的会话同样视为「非开始」。
  *
- * `sessionTitle.rename()` 会以 `source: 'user'` 固定标题，因此之后不会再被自动标题覆盖；
- * 这正是 `/cmd` 作为会话第一动作时的期望。失败一律静默，不影响命令执行。
+ * @param {any} service sessionTitle 服务
+ * @param {any} session 会话（需提供 `snapshotEvents()`）
+ * @returns {boolean}
+ */
+export function isConversationStart(service, session) {
+  let current
+  try {
+    current = typeof service?.get === 'function' ? service.get(session) : undefined
+  } catch {
+    return false
+  }
+  if (current !== undefined && current !== null) return false
+  let events
+  try {
+    events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : undefined
+  } catch {
+    events = undefined
+  }
+  if (!Array.isArray(events)) return false
+  for (const event of events) {
+    const type = event?.type
+    if (type === 'user/message' || type === 'turn/start') return false
+  }
+  return true
+}
+
+/**
+ * 用命令命名当前会话——**仅当 `/cmd` 是对话的第一个动作时**。
+ *
+ * 对话中途执行的 `/cmd` 不改标题：此时会话已有标题或已有 `user/message` /
+ * `turn/start` 活动，`isConversationStart()` 返回 false。命令本身照常执行并
+ * 把结果发给模型。
+ *
+ * `sessionTitle.rename()` 以 `source: 'user'` 固定标题，之后自动标题不再覆盖；
+ * 失败一律静默，不影响命令执行。
  *
  * @param {any} ctx 插件上下文
  * @param {any} agent 接收命令的 Agent（需带 `session`）
@@ -207,22 +237,16 @@ export function syncSessionTitle(ctx, agent, command) {
   if (session === undefined || session === null) return false
   const title = titleFromCommand(command)
   if (title.length === 0) return false
-  let current
-  try {
-    current = typeof service.get === 'function' ? service.get(session) : undefined
-  } catch {
-    return false
-  }
-  const ourSeq = titledSessions.get(session)
-  if (current !== undefined && current !== null && current.source?.kind === 'user' && current.eventSeq !== ourSeq) {
-    // 人工命名过，尊重用户选择。
-    return false
-  }
-  try {
-    const snapshot = service.rename(session, title)
-    if (snapshot !== undefined && snapshot !== null && Number.isFinite(snapshot.eventSeq)) {
-      titledSessions.set(session, snapshot.eventSeq)
+  // 已有待处理输入（排队中的 user 消息）说明对话已经开始，不要再改名。
+  const inbox = agent?.inbox
+  if (inbox !== undefined && inbox !== null) {
+    if ((Array.isArray(inbox.nextTurn) && inbox.nextTurn.length > 0) || (Array.isArray(inbox.nextStep) && inbox.nextStep.length > 0)) {
+      return false
     }
+  }
+  if (!isConversationStart(service, session)) return false
+  try {
+    service.rename(session, title)
     return true
   } catch {
     // 标题失败（例如超出字节上限被拒绝）不影响命令本身。
