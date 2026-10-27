@@ -514,15 +514,22 @@ describe('executeShellCommand', () => {
     assert.equal(h.followups.length, 0)
   })
 
-  it('裸 /cmd：有 web 服务时返回终端打开标记，不执行命令、不 followup', async () => {
+  it('裸 /cmd：有 web 服务时返回终端打开标记、记录打开请求，不执行命令、不 followup', async () => {
     const routes = []
+    const opened = []
     const h = makeHarness({
       webServer: { register: (route) => (routes.push(route), () => {}) },
       connection: { requestRejection: () => undefined },
       agents: { get: () => undefined },
     })
 
-    const out = await executeShellCommand(h.ctx, { agent: h.agent, rawInput: '   ', signal: undefined })
+    const out = await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: '   ', signal: undefined },
+      { terminalRegistry: { requestOpen: (sessionId) => (opened.push(sessionId), true) } },
+    )
+
+    assert.deepEqual(opened, [h.session.id])
 
     assert.deepEqual(out, { kind: 'success', text: OPEN_MARKER })
     assert.equal(h.ensureCalls.length, 0)

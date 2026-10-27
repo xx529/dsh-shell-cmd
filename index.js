@@ -385,7 +385,15 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
   const command = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
   if (command.length === 0) {
     // 裸 `/cmd`：打开交互终端（需要浏览器半端与 web 服务）。
-    return isTerminalModeAvailable(ctx) ? { kind: 'success', text: OPEN_MARKER } : { kind: 'error', text: USAGE }
+    if (!isTerminalModeAvailable(ctx)) return { kind: 'error', text: USAGE }
+    // 浏览器半端有两种触发方式：commandview 看到标记（快路径）与轮询 status
+    // （兜底，避免命令行卡片未渲染时打不开）。两种方式都消费同一个打开请求。
+    try {
+      options.terminalRegistry?.requestOpen?.(invocation.agent?.session?.id ?? invocation.agent?.id)
+    } catch {
+      /* 记录打开请求失败不影响命令结果 */
+    }
+    return { kind: 'success', text: OPEN_MARKER }
   }
 
   // 用命令命名会话（在开始执行前就生效，侧边栏立即可见）。
@@ -440,6 +448,7 @@ export function apply(ctx, config = {}) {
     createShellCommandMessage,
     clipText,
   })
+  options.terminalRegistry = registry
   ctx.effect(() => () => registry.dispose(), 'dsh-shell-cmd: terminal registry')
 
   const webServer = optionalService(ctx, 'webServer')

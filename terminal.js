@@ -162,6 +162,8 @@ export function createTerminalRegistry(ctx, deps) {
   const { runShell, syncSessionTitle, createShellCommandMessage, clipText } = deps
   /** @type {Map<string, ReturnType<typeof createState>>} */
   const states = new Map()
+  /** 已请求打开、但浏览器半端尚未取走的会话（裸 /cmd 的宿主端信号）。 */
+  const pendingOpens = new Set()
 
   /** 按 sessionId 解析仍存活的 Agent。 */
   const resolveAgent = (sessionId) => {
@@ -211,12 +213,26 @@ export function createTerminalRegistry(ctx, deps) {
       return states.has(sessionId)
     },
 
+    /** 宿主侧记录一次“打开终端”请求（裸 /cmd 执行时调用）。 */
+    requestOpen(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return false
+      pendingOpens.add(sessionId)
+      return true
+    },
+
+    /** 浏览器半端轮询：取走一次打开请求，并报告是否已有终端状态。 */
+    status(sessionId) {
+      const pending = pendingOpens.delete(sessionId)
+      return { pendingOpen: pending === true, open: states.has(sessionId) }
+    },
+
     read(sessionId) {
       const state = states.get(sessionId)
       return state === undefined ? undefined : snapshot(state)
     },
 
     async open(sessionId) {
+      pendingOpens.delete(sessionId)
       const state = await ensureState(sessionId)
       return snapshot(state)
     },
@@ -321,6 +337,7 @@ export function createTerminalRegistry(ctx, deps) {
     },
 
     close(sessionId) {
+      pendingOpens.delete(sessionId)
       const state = states.get(sessionId)
       if (state === undefined) return false
       if (state.controller !== null) state.controller.abort(new Error('terminal closed'))
@@ -432,6 +449,8 @@ async function dispatch(registry, method, params) {
         const value = registry.read(sessionId)
         return { ok: true, value: value === undefined ? null : value }
       }
+      case 'status':
+        return { ok: true, value: registry.status(sessionId) }
       case 'send':
         return { ok: true, value: await registry.send(sessionId, typeof params.text === 'string' ? params.text : '') }
       case 'cancel':

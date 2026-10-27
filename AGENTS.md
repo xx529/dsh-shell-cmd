@@ -93,7 +93,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - `useSessionPolicy: true` → 用 `ctx.sandboxPolicy.resolve({ session })`，与模型 bash 工具同边界；
    - 环境变量由 `dsh-bash-local` 决定：`bash -c` + 进程 env + `NO_COLOR/TERM=dumb/PAGER=cat/GIT_PAGER=cat` 覆盖，不加载用户 shell rc。改这一块前先读该包。
 10. **交互终端（裸 `/cmd`）**：
-   - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`），commandview 看到标记后打开 `conversation.input.dock` 面板；卡片本身不渲染。
+   - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`）并记录一次打开请求（`registry.requestOpen`）。Client 有两条触发路径：commandview 看到标记（快路径）与 `conversation.input.dock` 轮询 `status`（兜底，处理卡片未渲染/拿不到 sessionId 的情况）；卡片本身不渲染。
    - RPC：`POST /cmd-terminal/rpc` 由 `webServer.register({kind:'exact'})` 提供，必须用 `connection.requestRejection({headers})` 做认证栅栏；客户端只做同源 `fetch`。
    - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
    - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。
@@ -110,7 +110,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 107 例全绿）。
+- 提交前：`npm run check && npm test`（当前 110 例全绿）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`req`/`res`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`。
@@ -148,7 +148,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 | 会话名不变 | 预期行为：仅“对话刚开始的第一次 `/cmd`”命名会话；对话中途、第二次 `/cmd`、已有标题/活动时都不改名。检查 `sessionTitle` 服务与 `nameSession` 配置 |
 | `/cmd` 报 `Operation not permitted` / `cannot open .git/FETCH_HEAD` | 沙箱策略被部署默认值接管：确认 `shell.resolve` 请求里带 `mode: 'danger-full-access'`（`resolveShellSandboxPolicy`）；见第 4 节第 9 条 |
 | 环境变量与终端不一致 | 已知设计：`bash -c` + DSH 进程 env，不加载 shell rc；用 `zsh -lc '…'` / 显式 `source` 兜底 |
-| 裸 `/cmd` 不打开终端面板 | 确认端口同源 fetch 成功（`/cmd-terminal/rpc` 返回 200）；客户端是否刷新；`conversation.input.dock` occupant 是否存在 |
+| 裸 `/cmd` 不打开终端面板 | 面板由两条路径触发（标记 / `status` 轮询）；确认 `/cmd-terminal/rpc` 可访问、页面已刷新、`conversation.input.dock` occupant 存在；Host 侧 `requestOpen` 是否被调用 |
 | 终端 RPC 401/403 | `webServer` 未注册路由或 `connection.requestRejection` 拒绝；检查 `isTerminalModeAvailable` 与页面认证 |
 | 终端面板打开但命令无输出 | 看 Host 返回的 error（busy/session-not-found）；确认 `agents.get(sessionId)` 能解析到活 Agent |
 | 安装后缺文件 | `package.json` 的 `files` 是否覆盖新增文件；仓库安装按 `files` 打包 |

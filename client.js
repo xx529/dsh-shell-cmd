@@ -821,12 +821,43 @@ window.__ModuleLoader__.load({
 
     /**
      * `conversation.input.dock` 条目：终端打开时渲染面板。
-     * @param {{ sessionId?: string, t?: Function }} props
+     *
+     * 触发有两条路径：
+     * 1. commandview 看到裸 `/cmd` 的标记后调用 `setTerminalOpen`（快路径）；
+     * 2. 这里轮询 Host 的 `status`，取走裸 `/cmd` 记录的打开请求（兜底：
+     *    命令行卡片未渲染 / 组件未拿到 sessionId 时仍能打开）。
+     *
+     * @param {{ sessionId?: string, session?: { id?: string }, t?: Function }} props
      */
     function TerminalDock(props) {
-      const sessionId = props.sessionId
+      const sessionId =
+        typeof props.sessionId === 'string' && props.sessionId.length > 0
+          ? props.sessionId
+          : typeof props.session?.id === 'string'
+            ? props.session.id
+            : ''
       const open = useTerminalOpen(sessionId)
-      if (!open || typeof sessionId !== 'string' || sessionId.length === 0) return null
+
+      React.useEffect(() => {
+        if (open || sessionId.length === 0) return undefined
+        let cancelled = false
+        const tick = async () => {
+          try {
+            const status = await terminalRpc(sessionId, 'status')
+            if (!cancelled && status !== null && status.pendingOpen === true) setTerminalOpen(sessionId, true)
+          } catch {
+            /* 轮询失败静默；下一个周期重试 */
+          }
+        }
+        const timer = window.setInterval(tick, 600)
+        void tick()
+        return () => {
+          cancelled = true
+          window.clearInterval(timer)
+        }
+      }, [open, sessionId])
+
+      if (!open || sessionId.length === 0) return null
       return h(TerminalView, { sessionId, tr: makeTranslator(props.t) })
     }
 

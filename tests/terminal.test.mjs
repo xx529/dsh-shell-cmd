@@ -356,6 +356,23 @@ describe('createTerminalRegistry', () => {
     await running
   })
 
+  it('requestOpen / status 传递并消费一次打开请求', () => {
+    const h = makeHarness()
+
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
+    assert.equal(h.registry.requestOpen('s-1'), true)
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: true, open: false })
+    // 第二次读取已被取走
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
+  })
+
+  it('open 会清除挂起的打开请求', async () => {
+    const h = makeHarness()
+    h.registry.requestOpen('s-1')
+    await h.registry.open('s-1')
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: true })
+  })
+
   it('close 移除会话状态', async () => {
     const h = makeHarness()
     await h.registry.open('s-1')
@@ -468,6 +485,17 @@ describe('createTerminalRpcHandler', () => {
 
     assert.equal(result.status, 401)
     assert.equal(result.json.error.code, 'unauthorized')
+  })
+
+  it('status 分派返回 pendingOpen / open', async () => {
+    const h = makeHarness()
+    h.registry.requestOpen('s-1')
+    const result = await callRpc(makeHandler(h), {
+      req: makeReq({ body: { method: 'status', params: { sessionId: 's-1' } } }),
+    })
+
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.json.value, { pendingOpen: true, open: false })
   })
 
   it('send 分派到注册表并返回新行', async () => {
