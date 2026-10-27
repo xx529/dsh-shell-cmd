@@ -29,6 +29,18 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 - 会话标题：**仅当 `/cmd` 是对话第一个动作时**，用命令本身命名会话（见「会话标题规则」）。
 - 历史回放：卡片从 `command/run` + `command/done` 折叠出的 `CommandNode` 重建，重开会话/刷新后仍在。
 
+## 截图
+
+真实运行截图（`docs/screenshots/`，左侧会话栏已模糊处理）：
+
+| 终端卡片 | 交互终端（裸 `/cmd`） |
+| --- | --- |
+| ![终端卡片](docs/screenshots/01-terminal-card.png) | ![交互终端](docs/screenshots/02-interactive-terminal.png) |
+
+输入框进入 `/cmd` 模式时，状态栏会提示「终端命令模式：先执行命令，再把命令与输出一起发给模型。」：
+
+![输入框 /cmd 模式](docs/screenshots/03-composer-cmd-mode.png)
+
 ## 使用
 
 1. 在输入框键入 `/`，从命令菜单选择 **cmd**（或直接输入 `/cmd `），菜单会显示命令说明与输入提示。
