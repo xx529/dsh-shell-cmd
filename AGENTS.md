@@ -96,7 +96,8 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`）并记录一次打开请求（`registry.requestOpen`）。Client 有两条触发路径：commandview 看到标记（快路径）与 `conversation.input.dock` 轮询 `status`（兜底，处理卡片未渲染/拿不到 sessionId 的情况）；卡片本身不渲染。
    - RPC：`POST /cmd-terminal/rpc` 由 `webServer.register({kind:'exact'})` 提供，必须用 `connection.requestRejection({headers})` 做认证栅栏；客户端只做同源 `fetch`。
    - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
-   - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。
+   - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
+   - 焦点：命令执行期间输入行用 `readOnly`（不要 `disabled`，否则焦点被浏览器移走），执行结束后 effect 把焦点还给输入行。
    - 限制：按行 REPL，不支持全屏 TUI / 真 TTY；不要把它改成 `ctx.terminals`（PTY 受会话沙箱限制，与人类命令的 danger-full-access 语义冲突）。
 
 ## 5. 修改指南

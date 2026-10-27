@@ -690,8 +690,9 @@ window.__ModuleLoader__.load({
       }, [lines, busy, loading])
 
       React.useEffect(() => {
-        if (!loading && !sent) inputRef.current?.focus()
-      }, [loading, sent])
+        // 命令执行结束（busy 变 false）后把焦点还给输入行：用户不应再点一次鼠标。
+        if (!loading && !sent && !busy) inputRef.current?.focus()
+      }, [loading, sent, busy])
 
       const close = () => {
         terminalRpc(sessionId, 'close').catch(() => {})
@@ -699,7 +700,11 @@ window.__ModuleLoader__.load({
       }
 
       const send = async () => {
-        if (busy || sent) return
+        if (sent) return
+        if (busy) {
+          setError(tr('terminal.running'))
+          return
+        }
         if (value.trim().length === 0) return
         const text = value
         setBusy(true)
@@ -729,6 +734,8 @@ window.__ModuleLoader__.load({
         try {
           applySnapshot(await terminalRpc(sessionId, 'finish'))
           setSent(true)
+          // Ctrl+Enter 发送成功后终端面板直接消失，把位置还给输入框。
+          setTerminalOpen(sessionId, false)
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : String(cause))
         }
@@ -801,9 +808,12 @@ window.__ModuleLoader__.load({
             className: 'dsc-term-input',
             ref: inputRef,
             value,
-            disabled: busy || sent,
+            // 执行中保持可聚焦（用 readOnly 而不是 disabled），避免焦点被浏览器移走。
+            readOnly: busy,
+            disabled: sent,
             placeholder: tr('terminal.placeholder'),
             'aria-label': tr('terminal.placeholder'),
+            'aria-busy': busy,
             autoComplete: 'off',
             spellCheck: false,
             onChange: (event) => setValue(event.target.value),
