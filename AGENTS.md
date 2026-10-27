@@ -94,7 +94,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 环境变量由 `dsh-bash-local` 决定：`bash -c` + 进程 env + `NO_COLOR/TERM=dumb/PAGER=cat/GIT_PAGER=cat` 覆盖，不加载用户 shell rc。改这一块前先读该包。
 10. **交互终端（裸 `/cmd`）**：
    - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`）并记录一次打开请求（`registry.requestOpen`）。Client 有两条触发路径：commandview 看到标记（快路径）与 `conversation.input.dock` 轮询 `status`（兜底，处理卡片未渲染/拿不到 sessionId 的情况）；卡片本身不渲染。
-   - RPC：自定义 connection RPC 通道——Host `ctx.connection.rpc.handle('/cmd-terminal', responder)`，Client `ctx.get('connection').rpc.call('/cmd-terminal','rpc',payload)`。connection 自己负责 Web/Electron 两种 carrier（不要直接 `fetch` 任意路径：Electron 页面 origin 下会 404/405）。`connection.rpc.intercept('/api')` 已被 api-gateway 占用且只允许一个，禁止使用。根路径 `webServer.register('/cmd-terminal/rpc')` 保留为手工 HTTP 回退。
+   - RPC：共享 `/api` 精确路由——Host `ctx.connection.fetch.register({path:'/api/cmd-terminal/rpc', methods:['POST'], requestBody:'buffered', fetch})`，Client 相对地址 `fetch('api/cmd-terminal/rpc', POST JSON)`（与 dsh-context 的 `/api/dsh-context/attachment` 完全同款；Web/Electron 都由 connection carrier 处理）。`connection.rpc.handle` 依赖调用方 context 的 webServer，`rpc.intercept('/api')` 被 api-gateway 占用，均不可用。根路径 `webServer.register('/cmd-terminal/rpc')` 保留为手工回退。
    - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
    - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
    - 焦点：命令执行期间输入行用 `readOnly`（不要 `disabled`，否则焦点被浏览器移走），执行结束后 effect 把焦点还给输入行。

@@ -567,11 +567,8 @@ window.__ModuleLoader__.load({
     // 交互终端：打开状态（按 session）、RPC 客户端与面板
     // ------------------------------------------------------------------
 
-    /** 自定义 RPC 通道（与 terminal.js 的 TERMINAL_RPC_CHANNEL / ENDPOINT 一致）。 */
-    const TERMINAL_RPC_CHANNEL = '/cmd-terminal'
-    const TERMINAL_RPC_ENDPOINT = 'rpc'
-    /** Client 侧 `ctx.get('connection').rpc`（Web/Electron 都由 connection 处理）。 */
-    let terminalClientRpc = null
+    /** 共享 `/api` 桥上的相对路径（与 terminal.js 的 TERMINAL_FETCH_PATH 对应）。 */
+    const TERMINAL_RPC = 'api/cmd-terminal/rpc'
     /** 裸 /cmd 的打开标记（与 terminal.js 的 OPEN_MARKER 一致）。 */
     const TERMINAL_MARKER = '[[dsh-shell-cmd:terminal]]'
     /** 只对“刚发生”的命令行打开终端，避免回放历史时误触发。 */
@@ -609,17 +606,25 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(subscribe, getSnapshot)
     }
 
-    /** 调用 Host 的终端 RPC（自定义 connection RPC 通道）。 */
+    /** 调用 Host 的终端 RPC（共享 `/api` 精确路由，相对页面 base 解析）。 */
     async function terminalRpc(sessionId, method, params) {
-      if (terminalClientRpc === null) throw new Error('terminal: connection rpc is unavailable')
       const payload = { method, params: { sessionId, ...(params ?? {}) } }
-      const result = await terminalClientRpc.call(TERMINAL_RPC_CHANNEL, TERMINAL_RPC_ENDPOINT, payload)
-      if (result === null || typeof result !== 'object') throw new Error('terminal: empty rpc result')
-      if (result.ok !== true) {
-        const message = result.error?.message ?? result.error?.code ?? 'terminal rpc failed'
+      const response = await fetch(TERMINAL_RPC, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      let json = null
+      try {
+        json = await response.json()
+      } catch {
+        json = null
+      }
+      if (json === null || json.ok !== true) {
+        const message = json?.error?.message ?? `HTTP ${response.status}`
         throw new Error(message)
       }
-      return result.value
+      return json.value
     }
 
     /** 与卡片一致的翻译函数（带英文兜底）。 */
@@ -900,14 +905,6 @@ window.__ModuleLoader__.load({
      * @param {any} ctx 插件根上下文（inject: slots / locale）
      */
     function apply(ctx) {
-      try {
-        const connection = typeof ctx?.get === 'function' ? ctx.get('connection') : undefined
-        const rpc = connection !== undefined && connection !== null ? connection.rpc : undefined
-        terminalClientRpc =
-          rpc !== undefined && rpc !== null && typeof rpc.call === 'function' ? rpc : null
-      } catch {
-        terminalClientRpc = null
-      }
       ctx.effect(() => insertStyle(), 'dsh-shell-cmd: card styles')
       let translate = null
       try {

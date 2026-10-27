@@ -21,11 +21,8 @@ export const OPEN_MARKER = '[[dsh-shell-cmd:terminal]]'
 /** 浏览器半端与 Host 之间的固定 HTTP RPC 路径。 */
 export const TERMINAL_ROUTE = '/cmd-terminal/rpc'
 
-/** 自定义 RPC 通道（`connection.rpc.handle` 注册，`connection.rpc.call` 调用）。 */
-export const TERMINAL_RPC_CHANNEL = '/cmd-terminal'
-
-/** 该通道上的端点名。 */
-export const TERMINAL_RPC_ENDPOINT = 'rpc'
+/** 共享 `/api` 桥上的精确路由路径（客户端用相对 `api/cmd-terminal/rpc`）。 */
+export const TERMINAL_FETCH_PATH = '/api/cmd-terminal/rpc'
 
 /** 滚动区上限：行数与字符数（超出丢最旧的行）。 */
 const MAX_LINES = 1200
@@ -549,24 +546,35 @@ export function createTerminalRpcHandler(options) {
   }
 }
 
+
+
 /**
- * 创建共享 `/api` 通道上的 RPC responder（Desktop 的 dsh-app 页面通过
- * `ctx.connection.rpc` 调用，不经过页面 origin 的 HTTP 路由）。
+ * 创建挂到 `ctx.connection.fetch` 的精确路由。
+ *
+ * 浏览器半端用相对地址 `api/cmd-terminal/rpc` 调用；Web 与 Desktop 都由
+ * connection 的 `/api` 桥处理（Electron 通过 IPC 桥，页面 origin 不参与）。
  *
  * @param {any} registry `createTerminalRegistry()` 的返回值
- * @returns {(endpoint: string, payload: any) => Promise<any>}
+ * @returns {(request: Request) => Promise<Response>}
  */
-export function createTerminalRpcResponder(registry) {
-  return async function terminalRpcResponder(endpoint, payload) {
-    if (endpoint !== TERMINAL_RPC_ENDPOINT) return fail('bad-request', `unknown endpoint: ${endpoint}`)
-    let body = paramsOf(payload)
-    // 共享通道的 Remote 信封可能是 { args: {...} }；两种形态都接受。
-    if (typeof body.method !== 'string' && body.args !== undefined && body.args !== null && typeof body.args === 'object') {
-      body = paramsOf(body.args)
+export function createTerminalFetchRoute(registry) {
+  return async function terminalFetchRoute(request) {
+    let body = null
+    try {
+      body = await request.json()
+    } catch {
+      body = null
     }
-    const method = typeof body.method === 'string' ? body.method : ''
-    if (method.length === 0) return fail('bad-request', 'method is required')
-    return dispatch(registry, method, paramsOf(body.params))
+    const box = paramsOf(body)
+    const method = typeof box.method === 'string' ? box.method : ''
+    if (method.length === 0) {
+      return Response.json(fail('bad-request', 'method is required'), {
+        status: 400,
+        headers: { 'cache-control': 'no-store' },
+      })
+    }
+    const result = await dispatch(registry, method, paramsOf(box.params))
+    const status = result.ok === true ? 200 : (STATUS_BY_CODE[result.error?.code] ?? 500)
+    return Response.json(result, { status, headers: { 'cache-control': 'no-store' } })
   }
 }
-

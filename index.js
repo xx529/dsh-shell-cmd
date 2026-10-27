@@ -23,20 +23,17 @@
 import {
   OPEN_MARKER,
   TERMINAL_ROUTE,
-  TERMINAL_RPC_CHANNEL,
+  TERMINAL_FETCH_PATH,
   createTerminalRegistry,
   createTerminalRpcHandler,
-  createTerminalRpcResponder,
+  createTerminalFetchRoute,
 } from './terminal.js'
 
 /** Host 插件名（与包名一致，便于日志定位）。 */
 export const name = 'dsh-shell-cmd'
 
-/** 依赖的 Host 服务；缺失时插件保持 inactive 而不是抛错。
- *  `webServer` 是硬依赖：`connection.rpc.handle` 会在调用方 context 上注册路由并读取
- *  `ctx.webServer`（Cordis Service 访问绑定到调用方 context），没有 inject 会报
- *  “cannot get property webServer without inject”。 */
-export const inject = ['commands', 'shell', 'workingDirectory', 'webServer']
+/** 依赖的 Host 服务；缺失时插件保持 inactive 而不是抛错。 */
+export const inject = ['commands', 'shell', 'workingDirectory']
 
 /** 单条命令的默认超时（毫秒）。 */
 export const DEFAULT_TIMEOUT_MS = 120_000
@@ -335,12 +332,12 @@ function optionalService(ctx, name) {
  */
 export function isTerminalModeAvailable(ctx) {
   const connection = optionalService(ctx, 'connection')
-  const rpc = connection === undefined || connection === null ? undefined : connection.rpc
+  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
   return (
     optionalService(ctx, 'agents') !== undefined &&
-    rpc !== undefined &&
-    rpc !== null &&
-    typeof rpc.handle === 'function'
+    fetchRoutes !== undefined &&
+    fetchRoutes !== null &&
+    typeof fetchRoutes.register === 'function'
   )
 }
 
@@ -462,14 +459,22 @@ export function apply(ctx, config = {}) {
   const webServer = optionalService(ctx, 'webServer')
   const connection = optionalService(ctx, 'connection')
 
-  // 首选传输：自定义 RPC 通道 `/cmd-terminal`。Client 用
-  // `ctx.get('connection').rpc.call('/cmd-terminal','rpc',payload)`；
-  // Host 用 `connection.rpc.handle` 注册，Electron/Web 两种 carrier 都由
-  // connection 自己处理（Electron 走 IPC 桥，不会出现页面 origin 的 404/405）。
-  const rpc = connection === undefined || connection === null ? undefined : connection.rpc
-  if (rpc !== undefined && rpc !== null && typeof rpc.handle === 'function') {
-    const responder = createTerminalRpcResponder(registry)
-    ctx.effect(() => rpc.handle(TERMINAL_RPC_CHANNEL, responder), 'dsh-shell-cmd: terminal rpc channel')
+  // 首选传输：`connection.fetch` 的 `/api` 精确路由（参考 dsh-context）。
+  // Client 用相对地址 `api/cmd-terminal/rpc`；Web 与 Desktop 都由 connection
+  // 的 `/api` 桥处理并认证。
+  const fetchRoutes = connection === undefined || connection === null ? undefined : connection.fetch
+  if (fetchRoutes !== undefined && fetchRoutes !== null && typeof fetchRoutes.register === 'function') {
+    const route = createTerminalFetchRoute(registry)
+    ctx.effect(
+      () =>
+        fetchRoutes.register({
+          path: TERMINAL_FETCH_PATH,
+          methods: ['POST'],
+          requestBody: 'buffered',
+          fetch: route,
+        }),
+      'dsh-shell-cmd: terminal /api fetch route',
+    )
   }
   if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
     const handler = createTerminalRpcHandler({
