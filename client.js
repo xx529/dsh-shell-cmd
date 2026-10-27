@@ -218,11 +218,9 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion: reduce) { .dsc-hint-dot { animation: none; } }
 .dsc-hint-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-term {
-  width: 100%;
-  max-width: 100%;
   box-sizing: border-box;
   align-self: stretch;
-  margin: 6px 0 2px;
+  margin: 6px 14px 2px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
@@ -567,8 +565,29 @@ window.__ModuleLoader__.load({
     // 交互终端：打开状态（按 session）、RPC 客户端与面板
     // ------------------------------------------------------------------
 
-    /** 共享 `/api` 桥上的相对路径（与 terminal.js 的 TERMINAL_FETCH_PATH 对应）。 */
+    /** 共享 `/api` 桥上的路由路径（与 terminal.js 的 TERMINAL_FETCH_PATH 对应）。 */
     const TERMINAL_RPC = 'api/cmd-terminal/rpc'
+
+    /**
+     * 解析终端 RPC 的绝对地址：优先用 Desktop 启动载荷里的 Host HTTP origin
+     * （`__DSH_TRANSPORT__.streamBaseUrl`），其次 `document.baseURI`。
+     * 页面 baseURI 带子路径时，单纯相对地址会解析错导致 404。
+     */
+    function terminalEndpoint() {
+      try {
+        const transport = globalThis.__DSH_TRANSPORT__
+        const base =
+          transport !== undefined && transport !== null && typeof transport.streamBaseUrl === 'string' && transport.streamBaseUrl.length > 0
+            ? transport.streamBaseUrl
+            : typeof document === 'undefined'
+              ? ''
+              : document.baseURI
+        if (typeof base === 'string' && base.length > 0) return new URL(TERMINAL_RPC, base).toString()
+      } catch {
+        /* fall through */
+      }
+      return TERMINAL_RPC
+    }
     /** 裸 /cmd 的打开标记（与 terminal.js 的 OPEN_MARKER 一致）。 */
     const TERMINAL_MARKER = '[[dsh-shell-cmd:terminal]]'
     /** 只对“刚发生”的命令行打开终端，避免回放历史时误触发。 */
@@ -609,7 +628,7 @@ window.__ModuleLoader__.load({
     /** 调用 Host 的终端 RPC（共享 `/api` 精确路由，相对页面 base 解析）。 */
     async function terminalRpc(sessionId, method, params) {
       const payload = { method, params: { sessionId, ...(params ?? {}) } }
-      const response = await fetch(TERMINAL_RPC, {
+      const response = await fetch(terminalEndpoint(), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
@@ -944,12 +963,12 @@ window.__ModuleLoader__.load({
 
       const TerminalEntry = (props) => h(TerminalDock, translate === null ? props : { ...props, t: translate })
       TerminalEntry.displayName = 'DshShellCmdTerminal'
-      ctx.slots.inject('conversation.composer.dock', () =>
+      ctx.slots.inject('conversation.input.dock', () =>
         ctx.slots.register(
           {
-            name: 'conversation.composer.dock',
+            name: 'conversation.input.dock',
             id: 'shell-cmd-terminal',
-            order: 5,
+            order: 10,
           },
           TerminalEntry,
         ),
