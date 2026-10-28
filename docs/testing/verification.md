@@ -3,7 +3,7 @@
 - 文档：`docs/testing/verification.md`
 - 作者：tester（独立验收角色；只写 `docs/testing/**` 与 `tests/regression/**`，不改产品代码与既有测试）
 - 创建：2026-10-28（task-4 准备阶段）
-- 状态：**checklist 已定稿，执行记录待 task-5 填写**
+- 状态：**checklist 已定稿；执行记录已完成（见第 9 节，2026-10-28）；运行时注册核查 PASS；最终裁定 PASS（视觉/交互未验证，见 9.8）**
 - 验收对象：`dsh-shell-cmd` 仓库（dsh 插件），三处修复 ①相对 `/api` 传输 ②`/cmd` 居中模态 ③关闭后不再自动重开
 - 实现归属：frontend（task-2：`client.js` / `package.json` / `README.md`）、backend（task-3：`index.js` / `terminal.js` / 既有测试）
 
@@ -73,7 +73,7 @@
 - **PASS**：无 CRITICAL、无 HIGH 未通过项；所有能执行的检查均有证据；未覆盖项已显式列出且不掩盖风险。
 - **FAIL**：任一 CRITICAL 或 HIGH 项判定失败/无法取证。
 - MEDIUM/LOW 项失败不改变裁定，但必须写入“残留问题”。
-- 无法验证项不得算作通过，只能算“未覆盖”；若未覆盖项本身承载 CRITICAL 契约（如“相对端点是否真的可达”），裁定需在报告中标注 **PASS（有限）** 并写明边界，由 Lead 决定是否接受。
+- 无法验证项不得算作通过，只能算“未覆盖”；若未覆盖项本身承载 CRITICAL 契约（如“相对端点是否真的可达”），裁定需在报告中标注 **PASS** 并显式列出未覆盖项/边界（可写作“PASS（含未覆盖项）”或“PASS（有限）”），由 Lead 决定是否接受。
 
 ### 3.3 证据标准（每条检查必须可复核）
 
@@ -86,7 +86,7 @@
 
 ## 4. Checklist（分组）
 
-> 结果列在 task-4 阶段统一为 `待执行`；task-5 执行时逐项填 `PASS` / `FAIL` / `未验证` / `不适用`，并在第 9 节附证据。
+> 结果列在 task-4 阶段统一为 `待执行`；task-5 执行时逐项填 `PASS` / `FAIL` / `未验证` / `不适用`，并在第 9 节附证据。**本次（2026-10-28）逐项判定与证据见第 9 节：A/B 组静态 → 9.2，C 组命令/用例 → 9.3/9.4，D 组运行时 → 9.5，E 组视觉 → 9.6，F 组负向 → 9.7，最终裁定 → 9.8。**
 > 检查项编号在 task-5 的执行记录中保持不变，便于交叉引用。
 
 ### 4.1 A 组 · Client 静态/契约层（`client.js`、`package.json`、`README.md`）
@@ -306,59 +306,140 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 
 ---
 
-## 9. 执行记录（task-5 填写）
+## 9. 执行记录（task-5）
 
-> 本节在实现完成、tester 收到 Lead 通知后填写。所有“结果”必须与第 4 节 checklist ID 一一对应。
-> **禁止填写未实际执行的命令或未实际看到的返回。**
+> 执行时间：2026-10-28 09:52 ~ 10:05（Asia/Shanghai）。所有“结果”均来自本次实际执行的命令/工具返回，未执行或未看到的项如实标注。
+> 说明：安装由 Lead 执行；tester 在委托沙箱内对 `plugin_manager` 的调用被权限拒绝（见 9.5），已用 profile 文件做独立旁证，并列出无法自证的项。
 
 ### 9.1 基线信息
 
 | 字段 | 值 |
 | --- | --- |
-| 验收时间 | （待填） |
-| 仓库 HEAD | （待填） |
-| 工作区是否干净 / diff 范围 | （待填） |
-| 实现 commit（若有） | （待填） |
-| Node 版本 | （待填） |
-| 安装状态（Lead 通知） | （待填） |
+| 仓库 HEAD | `303f699aaceb83c9b867918d12e417171dc2f69b`（`fix: 裸 /cmd 改为 /context 式模态，修复 Failed to fetch 与无法关闭`） |
+| 验收开始时工作区 | clean（`git status --short` 为空） |
+| 被验实现范围 | 相对 HEAD 的上一提交 `cae1d9a`，diff 覆盖 `client.js`/`index.js`/`terminal.js`/`package.json`/`README.md`/`AGENTS.md`/既有测试 |
+| 验收期间 tester 产生的变更 | 仅新增 `tests/regression/shell-cmd.test.mjs`、修改本文件（`docs/testing/verification.md` 第 9 节）；**未修改任何产品代码或既有测试** |
+| Node / npm | `v22.22.2` / `10.9.7` |
+| 安装状态 | Lead 通知：`plugin_manager install_bundle target=/Users/lzx/Documents/GitHub/dsh-shell-cmd` → `dsh-shell-cmd 0.3.12 <- ../../../Documents/GitHub/dsh-shell-cmd`，enabled/applied，profile 依赖切为 link |
+| 独立安装旁证（tester 只读核对） | `~/.dsh/profiles/desktop/package.json:20` → `"dsh-shell-cmd": "link:/Users/lzx/Documents/GitHub/dsh-shell-cmd"`；bundles 列表含 `dsh-shell-cmd`；`~/.dsh/profiles/desktop/node_modules/dsh-shell-cmd -> ../../../../Documents/GitHub/dsh-shell-cmd`；被 link 的包 `package.json` version=`0.3.12` |
+| 浏览器控制通道 | 不可用（无 CDP / 无 token 注入 / 无 headless 页面 harness） |
 
 ### 9.2 静态核查结果（A/B 组）
 
-（待填：逐项结果 + `file:line` 证据片段）
+> 证据行号均按 HEAD `303f699` 的最终文件内容核对。判定以“修复契约 + 不变量”为准。
+
+#### A 组 · Client（`client.js` / `package.json` / `README.md`）
+
+| ID | 结果 | 证据（file:line + 关键片段） |
+| --- | --- | --- |
+| A1 | **PASS** | `client.js:653` `const TERMINAL_RPC = 'api/cmd-terminal/rpc'`；`client.js:756` `response = await fetch(TERMINAL_RPC, {`；可执行代码中无 `streamBaseUrl` / `__DSH_TRANSPORT__` / `document.baseURI` / `new URL(`（`streamBaseUrl` 仅出现在 `client.js:648` 的说明性块注释中）；`function terminalEndpoint` 已不存在。R24 源码锁定通过 |
+| A2 | **PASS** | `client.js:1199` `ctx.slots.inject('conversation.input.overlay', ...)`；`client.js:1202-1205` `{ name:'conversation.input.overlay', id:'shell-cmd-terminal', order:20, inject:(sessionId)=>({sessionId}) }`；模态 JSX `client.js:1114-1135`（`dsc-term-backdrop`/`dsc-term-card`/`role=dialog`/`aria-modal`） |
+| A3 | **PASS** | `client.js:1179` `ctx.inject(['commandUi'], (scope) => {`；`client.js:1182-1192` `scope.commandUi.decorate({ name:'cmd', available:()=>true, ui:{ kind:'action', run:(session)=>{...setTerminalOpen(id,true)} } })`；注册包在 `scope.effect(...)` 中（`:1180-1181`）；`package.json:43-45` 三个 inject 包齐全，含 `@deepseek-ai/dsh-client-ui-commands` |
+| A4 | **PASS** | 可执行代码中不存在“claim 命中 cmd 即 `setTerminalOpen`”的行：`claimName` 仅用于 `ShellCmdHint`（`client.js:615-629`），与终端开关无交集；R27 源码锁定通过 |
+| A5 | **PASS** | 关闭函数 `client.js:1054-1074`：best-effort `terminalRpc(sessionId,'close').catch(()=>{})`（`:1060`）→ `setTerminalOpen(sessionId,false)`（`:1061`）→ 当 `draftRef.current.trim() !== '/cmd'` 直接返回，否则 `inputActions.setDraft('')`（`:1065-1069`）；Esc 捕获监听 `client.js:1076-1085`（`keydown` capture=true、`event.isComposing===true` 忽略、`preventDefault+stopPropagation`）；终端输入框 Esc 走 `onClose()`（`:941-945`）；另有 80ms 幂等去重（`:1045`、`:1057-1058`） |
+| A6a | **PASS** | `client.js:250-262` `.dsc-term-backdrop { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center; padding:24px }`；遮罩点击关闭 `client.js:1118-1122`（`event.target === event.currentTarget`），卡片内 `stopPropagation`（`:1130`） |
+| A6b | **PASS** | `client.js:259-261` `background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,0.45)); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);`；卡片 `client.js:263-274`（`width:min(860px,100%)`、`max-height:min(82vh,720px)`、`var(--dsw-alias-bg-layer-1)`、`var(--dsw-alias-border-l2)`、`border-radius:12px`、`var(--dsw-shadow-lv3,...)`） |
+| A6c | **PASS** | 新增样式仅用 `--dsw-alias-*` / `--dsw-shadow-*`；唯一字面色值 `#0006` 是 `var(--dsw-shadow-lv3, ...)` 的 fallback（`client.js:273`），`rgba(0,0,0,0.45)` 是 `var(--dsw-alias-bg-mask-1, ...)` 的 fallback（`:259`） |
+| A7 | **PASS（含 1 处有意偏离）** | `client.js:750-753` 超时计算、`:756-767` fetch 选项（`method:'POST'`、`credentials:'same-origin'`、`cache:'no-store'`、`content-type: application/json`、`body: JSON.stringify(payload)`、`AbortSignal.timeout(...)`）；错误映射 `client.js:721-744` + 文案表 `:59-71`(en)/`:102-114`(zh)；错误 + 重试按钮 `client.js:984-991`。**偏离**：轻量 RPC 15s（`:656`），`send` 单独放宽到 130s（`:662`、`:882`）以覆盖 Host 120s 命令超时；与 task-2 文字“15s”不同，但理由已写在代码注释/README，判定为合理偏离、非缺陷 |
+| A8 | **PASS** | `client.js:1002-1003` 输入行 `readOnly: busy \|\| sent`（不是 disabled）；焦点回给输入行 `client.js:869-871`；loading/error 态 `client.js:977-992`；`finish` 成功后 `setSent(true)` + `onClose()`（`:906-911`） |
+| A9 | **PASS** | 兜底 marker 打开 `client.js:455-477`（`isTerminalResult` 判空 args + OPEN_MARKER + 15s 新鲜度 + `openedTerminalMarkers` 按 `commandId:seq` 去重、上限 64）；轮询仅在 `!open` 时运行 `client.js:1087-1110`；可执行代码无 `name:'conversation.input.dock'` 注册（R25 锁定） |
+| A10 | **PASS** | `package.json:3` version `0.3.12`；`:43-45` inject；`files` 含 `client.js`/`terminal.js`/`index.js` 等（`:20-30`），无新增未声明运行文件 |
+| A11 | **PASS** | `README.md:73-160` 交互终端章节已改为模态/打开方式/外观/关闭方式/传输；`README.md:286-287` 数据流与装饰说明；`README.md:330-333` 排错行（Failed to fetch / 面板不打开 / 会话未就绪） |
+| A12 | **PASS（源码锁定）** | `client.js:21` `window.__ModuleLoader__.load({`；`client.js:1212` `return { inject: ['slots', 'locale'], apply }`；仅 `require('react')`；无 JSX（全部 `h(...)`）；样式经 `insertStyle`/effect 清理。**注意**：这是静态形态检查，未做运行时加载验证（见 9.5 client inspector 超时） |
+
+#### B 组 · Host（`terminal.js` / `index.js`）
+
+| ID | 结果 | 证据（file:line + 关键片段） |
+| --- | --- | --- |
+| B1 | **PASS** | `terminal.js:230-231` `status(sessionId) { return { pendingOpen: pendingOpens.has(sessionId), open: states.has(sessionId) } }`——无 `delete`；行为验证 R1 通过 |
+| B2 | **PASS** | `terminal.js:245-248` `open` 先 `pendingOpens.delete(sessionId)` 再 `ensureState`；R2/R3 通过（open 消费、重复 open `ensure` 仅 1 次） |
+| B3 | **PASS** | `terminal.js:351-358` `close` 清 `pendingOpens`、abort `state.controller`、删 state；无 state 返回 false；R4/R5/R6 通过 |
+| B4 | **PASS** | `finish` 唯一 followup：`terminal.js:334` 标题同步、`:343` `agent.followup(...)`、`:346` `states.delete(sessionId)`；`close` 分支无 followup（`:351-358`）；R7（close 不 followup）/R8（finish 才 followup 且删状态）/R9（busy）/R10（empty）全部通过 |
+| B5 | **PASS** | `index.js:463-490` 只保留 `ctx.inject(['connection'], ...)` 内 `createTerminalFetchRoute` + `fetch.register({ path: TERMINAL_FETCH_PATH, methods:['POST'], requestBody:'buffered', fetch })`；可执行代码无 `webServer`、无 `createTerminalRpcHandler`、无 `TERMINAL_ROUTE`（R33 锁定）；import 已收敛为 `OPEN_MARKER, TERMINAL_FETCH_PATH, createTerminalRegistry, createTerminalFetchRoute`（`index.js:22-28`）；R19 用“webServer 一碰就炸”的伪 ctx 验证 apply 不触碰它 |
+| B6 | **PASS** | `index.js:335-345` `isTerminalModeAvailable` 只读 `agents` + `connection.fetch.register`；R20 四组断言通过；既有测试 `tests/command.test.mjs:561` 亦覆盖 |
+| B7 | **PASS** | `terminal.js:384-389` `STATUS_BY_CODE`（bad-request 400 / session-not-found 404 / busy,empty 409）；`:438-448` `jsonResponse`（超 256KiB 降级 500）；`:459-473` route 分派；R11–R18 通过（200/400/404/409/坏 JSON） |
+| B8 | **PASS** | `index.js:390-405` 裸 `/cmd`：`isTerminalReady` → 不可用返回 `USAGE`、可用时 `requestOpen(...)` 并返回 `OPEN_MARKER`；R21/R22/R23 通过 |
 
 ### 9.3 命令与单测记录（C 组）
 
 | 命令 | 退出码 | 关键输出 |
 | --- | --- | --- |
-| `npm run check` | （待填） | （待填） |
-| `npm test` | （待填） | （待填：pass/fail 数） |
-| `npm run verify` | （待填） | （待填） |
-| `node --test tests/regression/shell-cmd.test.mjs` | （待填） | （待填） |
+| `npm run check` | `0` | `node --check` 三文件通过（无输出） |
+| `npm test` | `0` | `# tests 115` / `# suites 18` / `# pass 115` / `# fail 0`（新增回归测试前） |
+| `node --test tests/regression/shell-cmd.test.mjs` | `0` | `# tests 35` / `# pass 35` / `# fail 0`（R1–R35） |
+| `npm test`（加入回归测试后） | `0` | `# tests 150` / `# suites 25` / `# pass 150` / `# fail 0` |
+| `npm run verify` | `0` | `# tests 150` / `# suites 25` / `# pass 150` / `# fail 0` |
 
-### 9.4 新增回归测试结果（C5）
+### 9.4 新增独立回归测试（C5）
 
-（待填：R1–R30 通过情况；被调整的构造与原因）
+文件：`tests/regression/shell-cmd.test.mjs`（`node:test`，不 spawn 真进程、不联网；所有 Host 依赖为伪 ctx / 伪 registry / WHATWG `Request`/`Response`）。
 
-### 9.5 运行时注册核查（D 组，原始返回摘录）
+| 覆盖域 | 用例 | 结果 |
+| --- | --- | --- |
+| registry 生命周期 | R1 status peek 不消费 / R2 open 消费 / R3 重复 open 幂等（ensure 仅 1 次）/ R4 close 清状态 / R5 无状态 close 幂等 / R6 close 清 pendingOpen / R7 close 不 followup | 全 PASS |
+| finish 语义 | R8 finish 才 followup（含 cwd/命令文本）且删状态 / R9 busy 拒绝 / R10 empty 拒绝 | 全 PASS |
+| 运行中边界 | R34 close abort 运行中 signal / R35 重复 send busy 且不并发 | 全 PASS |
+| /api route | R11 成功 200 + no-store / R12 缺 method 400 / R13 缺 sessionId 400 / R14 未知 method 400 / R15 session-not-found 404 / R16 busy+empty 409 / R17 非 JSON 400 / R18 成功不被错误映射 | 全 PASS |
+| index.js apply | R19 只注册 connection.fetch 的 `/api` 路由、webServer 陷阱未被触碰 / R20 isTerminalModeAvailable 四组 / R21 裸 /cmd 返回 OPEN_MARKER + requestOpen / R22 不可用返回 USAGE / R23 apply handler 无 connection 时走 USAGE | 全 PASS |
+| 源码锁定（**非行为验证**） | R24 相对端点且无绝对化 / R25 overlay 注册 + hint 保留 + 无 input.dock / R26 commandUi.decorate action / R27 无 claim 自动打开 / R28 Esc capture + setDraft / R29 遮罩 fixed/inset/z200/blur/令牌 / R30 same-origin/no-store/timeout/错误映射/retry/readOnly / R31 package.json 0.3.12 + commandUi 依赖 / R32 terminal.js 无旧 handler / R33 index.js 无 webServer | 全 PASS |
 
-（待填：D1–D5 工具名、入参、返回原文）
+过程说明：首次运行有 2 例失败（R19/R23），原因是 tester 测试夹具的伪 `ctx.effect` 没有模拟 dsh “回调立即执行”的语义，导致 route 注册未发生；**只修改了测试文件**（让 `effect` 立即执行回调并保存 disposer），与产品代码无关；修正后全绿。
+
+局限（必须在裁定中体现）：R24–R33 是“源码锁定”，只证明源码中存在/不存在某实现，**不是运行时行为验证**；client 端真实渲染/点击/网络行为无法在本机自动化。
+
+### 9.5 安装后运行时注册核查（D 组，原始返回摘录）
+
+> tester 在委托沙箱内无法调用 `plugin_manager`（权限被拒）、client inspector 也超时；因此 D1–D3 由 **Lead 代跑**并回传原文，tester 只做转录与交叉核对（不伪造成 tester 自己执行）。D2/D3 的页面已被 client HMR 热替换为 0.3.12 新 bundle。
+
+| ID | 结果 | 工具/入参 | 原始返回 / 说明 |
+| --- | --- | --- | --- |
+| D1 | **PASS（Lead 代跑）** | `plugin_manager action=list_plugins`（offset=200 页，节选该行） | 原文：`{"entryId":"include:shell-cmd","moduleName":"dsh-shell-cmd","enabled":true,"fiberPhase":"active","patchId":"shell-cmd"}`。安装事实：profile `package.json:20` 为 `"dsh-shell-cmd": "link:/Users/lzx/Documents/GitHub/dsh-shell-cmd"`，`node_modules/dsh-shell-cmd` 为工作区符号链接，安装输出 `+ dsh-shell-cmd 0.3.12 <- ../../../Documents/GitHub/dsh-shell-cmd`，enabled/applied。**fiber 判据以 `fiberPhase:"active"` 为准，不用 Config.status。** |
+| D2 | **PASS（Lead 代跑）** | `cordis_inspect_query` client `Slots.listSubTree` `{"root":"conversation.input.overlay"}` | `available=true`；`selected.occupants` 含原文 `{"registrant":"Gb","id":"shell-cmd-terminal","order":20,"priority":0,"active":true}`；同槽其他 occupant：`slash-menu(0)`、`command-popup(1)`、`feedback-dialog(2)`、`context-modal(10, dsh-context)`、`popout-window-draft(100)`；`standardProps` 列表含 `useInput` / `inputActions` / `sessionId`（证实组件能拿到三者）。 |
+| D3 | **PASS（Lead 代跑）** | 同上 root=`conversation.composer.dock`；root=`conversation.chat.commandview` | composer.dock：`available=true`，occupant 原文 `{"registrant":"Gb","id":"shell-cmd-hint","order":20,"priority":0,"active":true}`；chat.commandview：occupant 原文 `{"registrant":"Gb","key":"cmd","priority":0,"active":true}`。 |
+| D4 | **PASS（tester 实跑）** | `cordis_inspect_query` host `Config.listConfigs` `{"name":"dsh-shell-cmd"}` | 返回：`{"entries":[{"id":"include:shell-cmd","patchId":"shell-cmd","name":"dsh-shell-cmd","status":"absent"}],"total":1,"nextOffset":null}`。按 scout 提醒：`status:"absent"` 表示本插件没有 Config schema，**不能据此判断 active/fiber 状态**；fiber 判据用 D1 的 `fiberPhase:"active"`。 |
+| D5 | **PASS（间接）** | — | 命令注册由 `tests/command.test.mjs:1145/1168/1212/1266` 与回归 R19/R23 覆盖；运行时工具未单独列出 `/cmd` 命令（低风险，记录为未单独取证）。 |
+
+**运行时注册核查结论：PASS。** 依据：
+1. Host fiber `enabled:true` + `fiberPhase:"active"`；
+2. 三个 client 槽 occupant 均 `active:true`，且新 overlay 槽出现 `id=shell-cmd-terminal`——旧版（0.3.11）终端注册在 `conversation.input.dock`，新槽位注册成功说明页面已加载 0.3.12 新 client bundle；
+3. `standardProps` 含 `useInput`/`inputActions`/`sessionId`，与 A2/A5 代码假设一致（Esc 清草稿所需的 `inputActions.setDraft` 有来源）。
+
+补充旁证（保留）：client 侧 `ctx.inject([...])` 是 dsh 客户端插件既有用法（`~/.dsh/profiles/desktop/node_modules/dsh-context/lib/client.js` 内 `e.inject([`configForms`], ...)`，同时其返回的静态 `inject` 只有 `['slots','locale']`），与本插件写法一致。
 
 ### 9.6 视觉/交互（E 组）
 
-（待填：全部 `未验证（无浏览器控制通道）`；列出 E1–E12 与人工复验步骤引用）
+**全部为“未验证（无浏览器控制通道）”。**
+
+原因（如实）：本机无可用页面控制通道——Electron 桌面端未暴露 CDP/远程调试端口；GUI 需要认证 token/cookie 且无受支持的注入方式。client inspector 后来恢复可用（D2/D3 已由 Lead 实跑，证明槽位注册 active），但 **inspect 只能证明“注册存在”，不能证明真实渲染、样式、点击或网络响应**。因此：
+
+- 不产出截图，不声称做过点击走查；
+- E1–E12（模态出现/Failed to fetch 消失/背景模糊/执行 echo hi/Esc 关闭且草稿无 /cmd/二次打开/点遮罩关闭/Ctrl+Enter 发送且无卡片/`/cmd <cmd>` 回归/明暗主题/错误态/焦点/控制台）全部 `未验证`；
+- 人工复验步骤见第 7 节（刷新页面 → 新会话 `/cmd` Enter → 模态 → `echo hi` → Esc → 输入框无 `/cmd` → 再次打开 → 点遮罩 → Ctrl+Enter → `/cmd echo ok` → 主题/错误态/控制台）。
 
 ### 9.7 负向场景（F 组）
 
-（待填）
+| ID | 结果 | 证据 |
+| --- | --- | --- |
+| F1 | **PASS**（Host 逻辑） | R22/R23：不可用 → `USAGE`，不 requestOpen、不注册路由 |
+| F2 | **PASS（Host 契约）/ 视觉未验证** | R15：`session-not-found` → 404 + 错误信封；client 本地化文案 `client.js:70`(en)/`:108`(zh) + 重试 `client.js:985-992`（静态锁定 R30）；模态内实际展示未验证 |
+| F3 | **PASS** | R9/R16/R35：busy → 409 / 拒绝并发 |
+| F4 | **PASS** | R10：empty → 拒绝且 followup=0；R16 empty→409 |
+| F5 | **PASS** | R7（close 不 followup）+ R8（仅 finish followup） |
+| F6 | **PASS** | R34：close 时运行中 signal 已 abort，且不产生未捕获异常 |
+| F7 | **PASS（Host 行为 + client 源码锁定）** | R1/R2（status 可重复 peek、open 只消费一次）+ 源码锁定 R24–R33（`openedTerminalMarkers` 去重、15s 新鲜度）；真实时序/回放场景未验证 |
+| F8 | **PASS（route 层）** | R17：非 JSON body → 400 不崩溃；超大 body 行为依赖 `request.json()` 实现，本次未单独构造（记录为“未覆盖的低风险项”） |
 
 ### 9.8 最终裁定
 
 | 字段 | 值 |
 | --- | --- |
-| 裁定 | （待填 PASS / FAIL） |
-| CRITICAL 失败项 | （待填） |
-| HIGH 失败项 | （待填） |
-| MEDIUM/LOW 残留 | （待填） |
-| 未覆盖项 | （待填） |
-| 人工待验项 | （待填） |
-| 证据文件 | `docs/testing/verification.md` + `tests/regression/shell-cmd.test.mjs` |
+| **裁定** | **PASS** —— 静态契约、Host 单测（150/150）、独立回归（35/35）、安装后运行时注册（Host fiber active + 3 个 client 槽 occupant active）均通过；未发现 CRITICAL/HIGH 失败项。视觉/交互与页面 Network 实际响应仍为人工待验（见下） |
+| CRITICAL 失败项 | 无 |
+| HIGH 失败项 | 无 |
+| 运行时注册核查 | **PASS**：D1 `fiberPhase:"active"`；D2 overlay occupant `id=shell-cmd-terminal, active:true`（证明新 client bundle）；D3 composer.dock `shell-cmd-hint`、chat.commandview `key=cmd` 均 active；D4 Config entry 可读（status=absent 仅表示无 schema） |
+| 未覆盖 / 未验证项（不作为失败证据，也不作为通过证据） | ① E1–E12 视觉与交互（无浏览器控制通道）——含模态居中/背景模糊真实渲染、Esc 后输入框无 `/cmd`、点遮罩、Ctrl+Enter 发送后无卡片、明暗主题、焦点、控制台无异常；② 页面 Network 中 `api/cmd-terminal/rpc` 实际 200 JSON（传输契约已由静态锁定 + 相对端点 + 同源配置 + D2 新 bundle 佐证，但没有实际抓包）；③ 真实桌面 `dsh-app://app` 下 forward+cookie 的实际成功（同上）；④ D5 运行时命令列表未单独取证 |
+| MEDIUM/LOW 残留 | ① A7：`send` 超时 130s 与 task 描述字面 15s 不同（有合理理由，已文档化）；② F8 超大 body 未单独测试（route 层非 JSON/缺字段已测）；③ `close` 的 80ms 幂等去重依赖时间窗口（符合预期）；④ AGENTS.md 同步变更不在本验收范围 |
+| 人工待验项 | 第 7 节 E1–E12 全部；重点：刷新页面后（1）新会话 `/cmd` + Enter → 居中模态 + 背景模糊、无 `Failed to fetch`；（2）执行 `echo hi` 有输出；（3）Esc 关闭后输入框无 `/cmd` 且 3 秒内不重开；（4）再次 `/cmd` 能打开；（5）`/cmd echo ok` 仍走 Host 且卡片正常；（6）Ctrl+Enter 发送后无残留卡片 |
+| 证据文件 | `docs/testing/verification.md`（本文件）+ `tests/regression/shell-cmd.test.mjs` |
+
+**裁定解释（二值口径）**：按第 3.2 节，“任一 CRITICAL/HIGH 失败即 FAIL”。本次所有可执行检查（静态契约、Host 单测、独立回归、安装后注册）均 PASS，没有失败项；剩余未覆盖项集中在**本机无法自动化的浏览器视觉/交互与真实网络抓包**，已如实标注并给出人工复验步骤。因此裁定 **PASS（含未覆盖项）**：代码与可观测注册层面可签收；用户可见行为的最终确认请按第 7 节人工执行，若人工复验发现异常，应回到 FAIL。
