@@ -3,7 +3,7 @@
 - 文档：`docs/testing/verification.md`
 - 作者：tester（独立验收角色；只写 `docs/testing/**` 与 `tests/regression/**`，不改产品代码与既有测试）
 - 创建：2026-10-28（task-4 准备阶段）
-- 状态：**checklist 已定稿；执行记录已完成（见第 9 节，2026-10-28）；运行时注册核查 PASS；最终裁定 PASS（视觉/交互未验证，见 9.8）；0.3.13 追加验收「发送后保留命令行卡片」见第 10 节（PASS，UI 待人工）**
+- 状态：**checklist 已定稿；0.3.12 三修复验收 PASS（第 9 节）；0.3.13 追加验收「发送后保留命令行卡片」PASS（第 10 节，含 10.7 GitHub 重装后运行时核查；视觉/交互仍待人工）**
 - 验收对象：`dsh-shell-cmd` 仓库（dsh 插件），三处修复 ①相对 `/api` 传输 ②`/cmd` 居中模态 ③关闭后不再自动重开
 - 实现归属：frontend（task-2：`client.js` / `package.json` / `README.md`）、backend（task-3：`index.js` / `terminal.js` / 既有测试）
 
@@ -511,7 +511,7 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 3. 刷新页面或重开会话后卡片是否仍在（log-only 持久化依赖 session log 回放）。
 4. Esc/点遮罩关闭**不出现卡片**、模型无消息（与 Ctrl+Enter 的差异）。
 5. 模型是否正常收到 transcript 并回复（followup 语义未变，但真实链路未抓包）。
-6. 图文文案风险（LOW）：`README.md` 说 followup 是“隐藏的 context 消息（UI 不直接展示它）”。从 Chat 源码看，`source.kind !== 'user'` 的 `user/message` 会被折成 `kind:'context'` 节点（`ContextMessageNodeView`），即**以 context 行展示而非完全隐藏**；该措辞不精确，建议人工看过 UI 后改文（不影响卡片功能）。
+6. ~~README 措辞风险~~ **已由 Lead 修正并复核**：README 现写作“`source.kind='shell-command'` 的消息由 Chat 建 context 节点（默认不渲染成普通用户气泡）”“UI 上表现为默认折叠的 Execution requested turn-trigger 通知”。tester 在 dsh Chat 源码中核对到 `turnTriggerDetails()` 对未知 kind 默认 `title='message.trigger.request'`（英文 “Execution requested”）且走 `turn-trigger` 节点，措辞与宿主行为方向一致；**折叠后的真实视觉仍待人工**（见 10.4-1/2）。
 7. 时序风险（LOW）：`done` 在 `followup` 之后追加；Chat 按 commandId 跨事件配对，正常应合并成一条节点。若真实 UI 出现“卡片停在执行中/两条卡片”，需回退检查配对时序。
 
 ### 10.5 人工复验步骤（交给 Lead/用户，刷新 Host 后执行）
@@ -530,8 +530,25 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 
 | 字段 | 值 |
 | --- | --- |
-| **裁定** | **PASS（含未覆盖项）** —— 事件契约、顺序/配对、失败容忍、close 不追加、模型输入不变均有单测+独立回归+宿主源码核对证据；`npm run verify` 167/167 全绿 |
+| **裁定** | **PASS（含未覆盖项）** —— 事件契约、顺序/配对、失败容忍、close 不追加、模型输入不变均有单测+独立回归+宿主源码核对证据；`npm run verify` 167/167 全绿；GitHub 重装后的运行时核查见 10.7（Host PASS / client 三槽 PASS：tester 通道超时，Lead 代跑原文） |
 | CRITICAL/HIGH 失败项 | 无 |
 | 未覆盖项 | 10.4 的 1–7（真实 UI 卡片渲染/顺序/持久化、Esc 差异、模型真实回复、README 措辞、跨事件时序），全部需要人工复验 |
-| MEDIUM/LOW 残留 | ① README“隐藏的 context 消息”措辞不精确（见 10.4-6）；② append 为同步调用（dsh 现实现如此），若未来 dsh 改为异步需重新评估 best-effort；③ `commandId` 前缀与 commands 服务不同但 Chat 不校验格式（已验证） |
+| MEDIUM/LOW 残留 | ① ~~README 措辞~~ 已修正并核对（见 10.4-6）；② append 为同步调用（dsh 现实现如此），若未来 dsh 改为异步需重新评估 best-effort；③ `commandId` 前缀与 commands 服务不同但 Chat 不校验格式（已验证） |
 | 与 §9 的关系 | §9 是对 0.3.12 三修复的验收记录；本节是 0.3.13 增量验收。§9.6/E7、§9.8 人工待验项（6）中“Ctrl+Enter 后不应有卡片”的旧期望已被本节取代 |
+
+### 10.7 GitHub 重装后运行时核查（task-8 步骤 5）
+
+> 发布/安装由 Lead 执行；tester 独立复核了可读的安装事实。`plugin_manager` 在 tester 委托沙箱中仍被权限拒绝（不重试），fiber 状态使用 Lead 代跑原文并注明；client inspector 由 tester 实跑（结果见下）。
+
+| ID | 结果 | 证据 / 原始返回 |
+| --- | --- | --- |
+| R1 发布 | **PASS（tester 独立复核）** | 工作区 `git status -sb` → `## main...origin/main`（干净）；HEAD = `22657d587da560319ca02db26e02451d10e913b5`；`git ls-remote origin main` = 同一 sha；提交 `22657d5 feat: 交互终端 Ctrl+Enter 发送后在对话里保留命令行卡片` 的 stat 显示**未改 `client.js`**（terminal.js/tests/docs/package only） |
+| R2 安装 | **PASS（tester 独立复核）** | `~/.dsh/profiles/desktop/package.json:20` = `https://codeload.github.com/xx529/dsh-shell-cmd/tar.gz/22657d587da560319ca02db26e02451d10e913b5`；bundles 含 `dsh-shell-cmd`；`node_modules/dsh-shell-cmd/package.json` version=`0.3.13`；`terminal.js` sha256 工作区=安装目录=`7a6f85a1…36a9cd`；`README.md`、`package.json` sha256 亦一致 |
+| R3 Host fiber | **PASS（Lead 代跑；tester 无权限）** | Lead 原文：`plugin_manager` offset=200 行 `{"entryId":"include:shell-cmd","moduleName":"dsh-shell-cmd","enabled":true,"fiberPhase":"active","patchId":"shell-cmd"}`；Lead 已执行 `set_plugin include:shell-cmd enabled=false → true`（均 applied） |
+| R4 host Config | **PASS（tester 实跑）** | `cordis_inspect_query` host `Config.listConfigs {"name":"dsh-shell-cmd"}` 返回 `{"entries":[{"id":"include:shell-cmd","patchId":"shell-cmd","name":"dsh-shell-cmd","status":"absent"}],"total":1,"nextOffset":null}`（absent=无 schema，不作 fiber 判据） |
+| R5 client 三槽 | **PASS（Lead 代跑；tester inspector 超时）** | tester 实跑 `Slots.listSubTree` 三个 root 均返回 `Client inspect query ... timed out after 10000ms`，client `Service.listService` 同样超时（tester 委托通道整体不可用，已如实记录）。Lead 在 Host 重载后实跑成功，原文：`conversation.input.overlay` → occupant `{"registrant":"Gb","id":"shell-cmd-terminal","order":20,"priority":0,"active":true}`；`conversation.composer.dock` → `{"registrant":"Gb","id":"shell-cmd-hint","order":20,"priority":0,"active":true}`；`conversation.chat.commandview` → `{"registrant":"Gb","key":"cmd","priority":0,"active":true}` |
+| R6 client bundle 版本 | **PASS（间接）** | client.js 本轮零改动（提交 stat 证明），inspector 也无法读取 bundle 版本号；R5 三槽 active 证明 client 端注册代码仍在运行。0.3.13 的 Host-only 行为（卡片事件）与 client 版本无关 |
+
+**运行时核查结论**：Host 侧 **PASS**（fiber active + 安装产物一致）；client 三槽 **PASS（Lead 代跑，R5 原文）**——tester 侧 client inspector 通道超时的问题已由 Lead 交叉复核，`shell-cmd-terminal` / `shell-cmd-hint` / `commandview key=cmd` 均 active。0.3.13 是 **Host-only 变更**（`client.js` 零改动，已由提交 stat 证明），与 client 注册状态无冲突。
+
+**最终裁定（task-8 / 0.3.13）**：**PASS（含未覆盖项）** —— 事件契约/顺序/配对/失败容忍/close 不追加/模型语义不变均有单元测试（backend2 8 例）+ 独立回归（tester 9 例）+ dsh 宿主源码核对证据；全量 167/167 全绿；GitHub 重装后 Host fiber active、安装产物一致、client 三槽 active。未覆盖（需人工）：真实 UI 卡片渲染/位置/顺序/展开/复制、刷新或重开会话后的持久化回放、Esc 不产卡与 Ctrl+Enter 的差异、模型真实收到 transcript 并回复（见 10.4、10.5）。若人工复验发现卡片缺失/重复/停在执行中，应回退为 FAIL。
