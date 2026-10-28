@@ -3,7 +3,7 @@
 - 文档：`docs/testing/verification.md`
 - 作者：tester（独立验收角色；只写 `docs/testing/**` 与 `tests/regression/**`，不改产品代码与既有测试）
 - 创建：2026-10-28（task-4 准备阶段）
-- 状态：**checklist 已定稿；执行记录已完成（见第 9 节，2026-10-28）；运行时注册核查 PASS；最终裁定 PASS（视觉/交互未验证，见 9.8）**
+- 状态：**checklist 已定稿；执行记录已完成（见第 9 节，2026-10-28）；运行时注册核查 PASS；最终裁定 PASS（视觉/交互未验证，见 9.8）；0.3.13 追加验收「发送后保留命令行卡片」见第 10 节（PASS，UI 待人工）**
 - 验收对象：`dsh-shell-cmd` 仓库（dsh 插件），三处修复 ①相对 `/api` 传输 ②`/cmd` 居中模态 ③关闭后不再自动重开
 - 实现归属：frontend（task-2：`client.js` / `package.json` / `README.md`）、backend（task-3：`index.js` / `terminal.js` / 既有测试）
 
@@ -439,7 +439,99 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 | 运行时注册核查 | **PASS**：D1 `fiberPhase:"active"`；D2 overlay occupant `id=shell-cmd-terminal, active:true`（证明新 client bundle）；D3 composer.dock `shell-cmd-hint`、chat.commandview `key=cmd` 均 active；D4 Config entry 可读（status=absent 仅表示无 schema） |
 | 未覆盖 / 未验证项（不作为失败证据，也不作为通过证据） | ① E1–E12 视觉与交互（无浏览器控制通道）——含模态居中/背景模糊真实渲染、Esc 后输入框无 `/cmd`、点遮罩、Ctrl+Enter 发送后无卡片、明暗主题、焦点、控制台无异常；② 页面 Network 中 `api/cmd-terminal/rpc` 实际 200 JSON（传输契约已由静态锁定 + 相对端点 + 同源配置 + D2 新 bundle 佐证，但没有实际抓包）；③ 真实桌面 `dsh-app://app` 下 forward+cookie 的实际成功（同上）；④ D5 运行时命令列表未单独取证 |
 | MEDIUM/LOW 残留 | ① A7：`send` 超时 130s 与 task 描述字面 15s 不同（有合理理由，已文档化）；② F8 超大 body 未单独测试（route 层非 JSON/缺字段已测）；③ `close` 的 80ms 幂等去重依赖时间窗口（符合预期）；④ AGENTS.md 同步变更不在本验收范围 |
-| 人工待验项 | 第 7 节 E1–E12 全部；重点：刷新页面后（1）新会话 `/cmd` + Enter → 居中模态 + 背景模糊、无 `Failed to fetch`；（2）执行 `echo hi` 有输出；（3）Esc 关闭后输入框无 `/cmd` 且 3 秒内不重开；（4）再次 `/cmd` 能打开；（5）`/cmd echo ok` 仍走 Host 且卡片正常；（6）Ctrl+Enter 发送后无残留卡片 |
+| 人工待验项 | 第 7 节 E1–E12 全部；重点：刷新页面后（1）新会话 `/cmd` + Enter → 居中模态 + 背景模糊、无 `Failed to fetch`；（2）执行 `echo hi` 有输出；（3）Esc 关闭后输入框无 `/cmd` 且 3 秒内不重开；（4）再次 `/cmd` 能打开；（5）`/cmd echo ok` 仍走 Host 且卡片正常；（6）Ctrl+Enter 发送后无残留卡片——**注：0.3.13 起改为「应出现一条终端卡片」，见第 10 节；该项旧期望已作废** |
 | 证据文件 | `docs/testing/verification.md`（本文件）+ `tests/regression/shell-cmd.test.mjs` |
 
 **裁定解释（二值口径）**：按第 3.2 节，“任一 CRITICAL/HIGH 失败即 FAIL”。本次所有可执行检查（静态契约、Host 单测、独立回归、安装后注册）均 PASS，没有失败项；剩余未覆盖项集中在**本机无法自动化的浏览器视觉/交互与真实网络抓包**，已如实标注并给出人工复验步骤。因此裁定 **PASS（含未覆盖项）**：代码与可观测注册层面可签收；用户可见行为的最终确认请按第 7 节人工执行，若人工复验发现异常，应回到 FAIL。
+
+---
+
+## 10. 追加验收：交互终端 Ctrl+Enter 后保留命令行卡片（task-8 / 0.3.13，2026-10-28）
+
+> 本章节验收购自 task-7（backend2）的增量：交互终端 `finish()` 追加 log-only 的 `command/run` + `command/done`，使对话里保留一条终端卡片。
+> 本章节**更新** §9.6/E7 与 §9.8 人工待验项（6）的旧期望：Ctrl+Enter 发送后现在**应当**出现一条卡片；Esc/close 仍**不应**出现卡片。
+> 验收范围仍为 tester 写作用域：`tests/regression/**`、`docs/testing/**`；未修改产品代码/既有测试。
+
+### 10.1 改动范围与契约（最终 diff 核对）
+
+| 文件 | 变更 | 证据（当前工作区） |
+| --- | --- | --- |
+| `terminal.js` | 新增 `appendCommandLifecycle(agent, type, data)`：只调 `agent.session.append(type,data)`，无 `session`/无 `append`/抛错都返回 `false`（best-effort） | `terminal.js:151-176`（函数体 `:167`） |
+| `terminal.js` | `finish()`：`syncSessionTitle` 后生成 `commandId = 'cmd-terminal-' + crypto.randomUUID()`，先追加 `command/run`（`{commandId,name:'cmd',args:firstCommand,source:{kind:'user'}}`），再 `agent.followup(...)`，成功后追加 `command/done`（`{commandId,kind:'success',text:transcript.text}`） | `terminal.js:368-403`（run `:369`；followup `:384`；done-success `:399`） |
+| `terminal.js` | `followup` 抛错：仅当 `recorded`（run 已落日志）时补 `command/done {kind:'error', text}`，错误原样再抛；`run` 追加失败则不补 `done` | `terminal.js:385-397`（error done `:389`） |
+| `terminal.js` | `finish` 成功后仍 `state.sent=true` + 删除 Host 会话状态（原语义不变） | `terminal.js:405-407` |
+| `terminal.js` | `close()` 分支零改动、零 append（Esc/点遮罩绝不产生卡片） | `close` 函数（与 §9.2 B3 相同），R41/R44 锁定 |
+| `package.json` | `version` 0.3.12 → **0.3.13** | `package.json:3` |
+| `README.md` / `AGENTS.md` | 文档同步「Ctrl+Enter 后对话保留终端卡片」「Esc 不产生卡片」「log-only、不进模型上下文」 | `README.md` 交互终端章节/快捷键表/终端内行为；`AGENTS.md` 第 4 节第 10 条 |
+| `tests/terminal.test.mjs` | backend2 新增 8 例（见 10.3） | `tests/terminal.test.mjs:498-636` |
+| `tests/regression/shell-cmd.test.mjs` | tester 新增 R36–R44（9 例）+ 夹具支持 `session.append` 记录/失败注入；R31 标题/断言版本同步 0.3.13 | `tests/regression/shell-cmd.test.mjs:381-541` |
+
+**契约要点（逐项核对结论）**：
+
+| # | 契约 | 结论 | 证据 |
+| --- | --- | --- | --- |
+| C1 | 顺序必须是 `command/run → followup → command/done` | **PASS** | R36 `calls.order === ['append:run','followup','append:done']`；`terminal.js:369/384/399` |
+| C2 | run/done 必须共用同一 `commandId` | **PASS** | 同一局部变量 `commandId`（`:368`），R36/R40 断言相同 |
+| C3 | `run.data = {commandId,name:'cmd',args:<第一条命令>,source:{kind:'user'}}` | **PASS** | R36 逐字段断言；source 便于其它插件识别为用户动作 |
+| C4 | `done.data.text` = 已 clip 的 transcript（不是 modelText/说明头） | **PASS** | R36 断言 `'$ echo one\nhi\n$ echo two\nhi'`；R44 锁定 `text: transcript.text`；R37 断言模型文本里没有 commandId/事件名 |
+| C5 | `run` 追加失败不阻断 followup，且不补孤立 done | **PASS** | R38：append 仅 `['command/run']`、followup=1、finish 成功、状态删除 |
+| C6 | `done` 追加失败不影响 finish | **PASS** | R39：append 尝试 run+done、followup=1、finish 成功 |
+| C7 | `followup` 抛错补 `kind:'error'` 的 done，错误原样抛出，状态保留 | **PASS** | R40：done.kind='error'、同 commandId、rejects `/followup failed/`、`has('s1')===true` |
+| C8 | `close`（Esc/点遮罩）绝不追加、不 followup | **PASS** | R41：`append=[]`、followup=0、order=[]；R44 静态锁定 close 块无 `append` |
+| C9 | 第二次 `finish` 不重复追加 | **PASS** | R42：第二次 reject `code='empty'`，append 数不变、followup 仍 1 |
+| C10 | 无 `session.append` 时 finish 仍成功 | **PASS** | R43：append=[]、followup=1、finish 成功 |
+| C11 | 模型输入语义不变（仍只走 followup；header+cwd+transcript；source kind `shell-command`） | **PASS** | R37；既有 `tests/command.test.mjs`/`tests/terminal.test.mjs` 全绿 |
+| C12 | 生命周期事件 log-only、不进模型上下文 | **PASS（契约层）** | 事件只经 `session.append`；模型输入仅 `agent.followup`；dsh 侧 `command/run`/`command/done` 是已知 log-only 事件（见 10.2） |
+
+### 10.2 对 dsh 宿主契约的独立核对（不止看本仓库测试）
+
+为确认“Host 追加事件后，Client 零改动就能出卡片”，tester 从本机 `app.asar` 独立提取了 dsh 内部实现并核对（只读，未改 dsh）：
+
+- 提取方式：解析 asar 头部 JSON 后按偏移读取 `@deepseek-ai/dsh-commands/lib/index.js` 与 `@deepseek-ai/dsh-client-ui-chat/lib/client.js`（asar 路径 `/Applications/DeepSeek Harness.app/Contents/Resources/app.asar`）。
+- `dsh-commands` 的 `execute()`：`command/run` 追加 `{commandId,name,args?,source:{kind:'user'}}`；`command/done` 追加 `{commandId,kind,text?,sourceEventSeq?}`；`appendLifecycle(session,type,data)` 直接 `session.append.bind(session)(type,data)`（**同步**，失败以 throw 暴露），`settleThrown` 对 `command/done` 错误做 contained（只 warn）。→ 与本插件的事件形状/同步 append/best-effort 语义一致。
+- `dsh-client-ui-chat` 的 `commandDefinition.match`：`command/run` → `{id:String(data.commandId), role:'start'}`；`command/done` → `{id:String(data.commandId), role:'update'}`；`commandFromRun` 生成 `{kind:'command',seq,time,commandId,name:data.name,args:data.args ?? null,outcome:null}`；`commandFromDone` 填 `outcome:{kind,text?}`；`CommandNodeView` 把节点渲染到 **`conversation.chat.commandview`，entryKey = `command.name ?? ''`**。
+- 结论：本插件以 `name:'cmd'` + 同一 `commandId` 追加 run/done 后，Chat 会折叠成 CommandNode，正好命中本插件已注册的 key=`cmd` 卡片；**client.js 无需改动**这一判断成立。commandId 前缀为 `cmd-terminal-<uuid>`（与 commands 服务的 `cmd-<token>-<seq>` 不同），但 Chat 只按 `String(commandId)` 配对、不校验格式，因此不影响。
+
+### 10.3 用例与命令证据
+
+| 层 | 证据 | 结果 |
+| --- | --- | --- |
+| backend2 既有单测（新增 8 例） | `tests/terminal.test.mjs:498-636`：顺序/同 commandId/args/transcript、模型输入不变、run 失败、done 失败、followup 抛错补 error done、close 零 append、二次 finish 不重复、无 append 仍成功 | 8/8 PASS |
+| tester 独立回归（新增 9 例） | `tests/regression/shell-cmd.test.mjs:381-541`：R36–R44（见 10.1 C1–C10） | 9/9 PASS |
+| 全量 | `npm run check` → exit 0；`npm test` → exit 0（**tests 167 / suites 28 / pass 167 / fail 0**）；`npm run verify` → exit 0（167/167） | PASS |
+
+> 说明：R44 是**源码锁定（regression lock）**，只断言源码文本中的事件形状/best-effort/close 边界，不是行为验证；行为由 R36–R43 用伪 `session.append` 覆盖。
+
+### 10.4 运行时/视觉待验项（本机无法自动验证，如实标注）
+
+以下**全部未验证**（无浏览器/页面控制通道，且卡片的真实渲染需要 Chat UI）：
+
+1. 真实 UI 中 Ctrl+Enter 后**卡片是否出现**、位置（应在该轮用户/模型消息之前）、顺序、展开/折叠、复制按钮。
+2. 卡片的 `cwd`/状态胶囊（success）/正文（transcript）视觉是否正确；长 transcript 是否截断可展开。
+3. 刷新页面或重开会话后卡片是否仍在（log-only 持久化依赖 session log 回放）。
+4. Esc/点遮罩关闭**不出现卡片**、模型无消息（与 Ctrl+Enter 的差异）。
+5. 模型是否正常收到 transcript 并回复（followup 语义未变，但真实链路未抓包）。
+6. 图文文案风险（LOW）：`README.md` 说 followup 是“隐藏的 context 消息（UI 不直接展示它）”。从 Chat 源码看，`source.kind !== 'user'` 的 `user/message` 会被折成 `kind:'context'` 节点（`ContextMessageNodeView`），即**以 context 行展示而非完全隐藏**；该措辞不精确，建议人工看过 UI 后改文（不影响卡片功能）。
+7. 时序风险（LOW）：`done` 在 `followup` 之后追加；Chat 按 commandId 跨事件配对，正常应合并成一条节点。若真实 UI 出现“卡片停在执行中/两条卡片”，需回退检查配对时序。
+
+### 10.5 人工复验步骤（交给 Lead/用户，刷新 Host 后执行）
+
+1. 确认插件已重载/重装为 0.3.13，并刷新页面。
+2. 新会话输入 `/cmd` → Enter，打开模态；执行两条命令：`pwd`、`echo hi`。
+3. 按 **Ctrl+Enter** 发送。
+   - 期望：模态关闭；对话中出现**一条终端卡片**（标题、cwd、状态 success、正文含 `$ pwd` 与 `$ echo hi` 及输出）；卡片位置在该轮对话中；模型收到并正常回复（回复内容应能对上这些命令）。
+   - 期望：卡片可展开/复制；刷新页面后卡片仍在。
+4. 反向验证：再次 `/cmd` → 执行 `echo esc-test` → 按 **Esc** 关闭。
+   - 期望：对话中**不**出现任何新卡片、模型无新消息。
+5. 反向验证：`/cmd echo draft` 直接发送（不带模态路径）仍渲染既有终端卡片（未受本次改动影响）。
+6. 观察浏览器/Electron DevTools Console：无 `slot entry crashed`、无 unhandled rejection。
+
+### 10.6 本次增量裁定
+
+| 字段 | 值 |
+| --- | --- |
+| **裁定** | **PASS（含未覆盖项）** —— 事件契约、顺序/配对、失败容忍、close 不追加、模型输入不变均有单测+独立回归+宿主源码核对证据；`npm run verify` 167/167 全绿 |
+| CRITICAL/HIGH 失败项 | 无 |
+| 未覆盖项 | 10.4 的 1–7（真实 UI 卡片渲染/顺序/持久化、Esc 差异、模型真实回复、README 措辞、跨事件时序），全部需要人工复验 |
+| MEDIUM/LOW 残留 | ① README“隐藏的 context 消息”措辞不精确（见 10.4-6）；② append 为同步调用（dsh 现实现如此），若未来 dsh 改为异步需重新评估 best-effort；③ `commandId` 前缀与 commands 服务不同但 Chat 不校验格式（已验证） |
+| 与 §9 的关系 | §9 是对 0.3.12 三修复的验收记录；本节是 0.3.13 增量验收。§9.6/E7、§9.8 人工待验项（6）中“Ctrl+Enter 后不应有卡片”的旧期望已被本节取代 |

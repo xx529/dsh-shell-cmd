@@ -97,7 +97,8 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 触发：主路径是 Client 侧 `commandUi.decorate` 给 Host 命令 `cmd` 挂的 bare action（`ctx.inject(['commandUi'])` → `decorate({ name:'cmd', available:()=>true, ui:{ kind:'action', run:(session)=>open(session.sessionId) } })`，与 `/context` 同款，token 被消费、草稿清空）；`package.json` 的 `dsh.client.inject` 必须包含 `@deepseek-ai/dsh-client-ui-commands`。兜底 1：commandview 看到裸 `/cmd` 的 `OPEN_MARKER`（只对 15s 内的新记录生效，按 `commandId:seq` 去重）；兜底 2：模态关闭时低频轮询 Host `status.pendingOpen`。
    - RPC：只保留共享 `/api` 精确路由——Host `ctx.connection.fetch.register({path:'/api/cmd-terminal/rpc', methods:['POST'], requestBody:'buffered', fetch})`，Client 相对地址 `fetch('api/cmd-terminal/rpc', POST JSON)`（与 dsh-context 的 `/api/dsh-context/attachment` 完全同款；Web/Electron 都由 connection carrier 处理，认证由桥本身完成，路由层不再返回 401/405/415）。**webServer 根路径 `/cmd-terminal/rpc` 已删除**（本 profile 实测不可达：GET 404 / POST 405），`createTerminalRpcHandler` 与 `TERMINAL_ROUTE` 一并移除；`connection.rpc.handle`（依赖调用方 context 的 webServer）与 `rpc.intercept('/api')`（被 api-gateway 占用）仍不可用。
    - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
-   - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
+   - 发送：`finish` 读滚动区 → 命名会话 → best-effort 追加命令生命周期事件（见下条）→ `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
+   - 卡片记录：`finish` 会 best-effort 追加一对 **log-only** 的 `command/run` + `command/done`（`agent.session.append`，`commandId = 'cmd-terminal-' + crypto.randomUUID()`，`command/run.data = { commandId, name:'cmd', args:<第一条命令>, source:{kind:'user'} }`，`command/done.data = { commandId, kind:'success', text:<已 clip 的 transcript> }`），形状与 commands 服务 `execute()` 完全一致；Chat 的 command Definition 把它折叠成 `CommandNode`，对话里因此保留一条终端卡片。它与「模型输入只走 followup」不冲突：事件是 UI/log 记录，不进模型上下文、不构成 surface 事件。任何一步 append 失败只吞掉（不阻断 followup、不把 finish 变成错误）；`run` 失败则不补 `done`（避免孤儿）；`followup` 抛错时补 `kind:'error'` 的 `done`（与 commands 服务的 settleThrown 同语义），错误原样抛出。**`close`（Esc / 点遮罩）绝不追加**。
    - 焦点：命令执行期间输入行用 `readOnly`（不要 `disabled`，否则焦点被浏览器移走），执行结束后 effect 把焦点还给输入行。
    - 布局：交互终端注册在 `conversation.input.overlay`（session 作用域），渲染全屏遮罩 + 居中卡片模态（`position:fixed; inset:0; z-index:200`、`backdrop-filter:blur(3px)`；点遮罩关闭，卡片内点击 `stopPropagation`）；`/cmd` 模式提示条 `ShellCmdHint` 仍注册在 `conversation.composer.dock`。
    - 轮询：**不在 claim 阶段自动打开**（否则 Esc 关闭后草稿仍是 `/cmd`，会被 claim 副作用立刻重开）；打开只由 commandUi action（主）/ OPEN_MARKER（兜底）触发。`status` 轮询仅在模态关闭时跑：`submitting` / `claimed` 相位进入后 8s 内按 180ms 快速轮询，其余时间 1.2s 低频兜底，且只读 `pendingOpen`。
@@ -116,7 +117,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 115 例全绿；新增 `tests/regression/**` 后以 `npm test` 实际统计为准）。
+- 提交前：`npm run check && npm test`（当前 167 例全绿；新增用例后以 `npm test` 实际统计为准）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`Request`/`Response`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` 下 root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`；root=`conversation.input.overlay` 应出现 occupant id=`shell-cmd-terminal`；root=`conversation.composer.dock` 应出现 id=`shell-cmd-hint`。

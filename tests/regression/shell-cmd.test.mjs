@@ -49,13 +49,28 @@ function deferred() {
 
 /** 造一个「会话 s1 活着」的 Host 注册表夹具（不 spawn、不联网）。 */
 function createRegistryFixture(options = {}) {
-  const calls = { followup: 0, messages: [], ensure: 0, ran: [], syncTitle: [] }
+  const calls = { followup: 0, messages: [], ensure: 0, ran: [], syncTitle: [], append: [], order: [] }
+  // 生命周期记录：默认提供 session.append（与真实 Host 一致），可注入失败/缺失。
+  const session =
+    options.sessionAppend === false
+      ? { id: 's1' }
+      : {
+          id: 's1',
+          append(type, data) {
+            calls.append.push({ type, data })
+            calls.order.push(type === 'command/run' ? 'append:run' : type === 'command/done' ? 'append:done' : `append:${type}`)
+            if (type === options.appendFailsFor) throw new Error(`append ${type} failed`)
+            return { type, seq: calls.append.length - 1 }
+          },
+        }
   const agent = {
     id: 'agent-1',
-    session: { id: 's1' },
+    session,
     followup(message) {
       calls.followup += 1
       calls.messages.push(message)
+      calls.order.push('followup')
+      if (options.followupThrows === true) throw new Error('followup failed')
     },
   }
   const ctx = {
@@ -360,6 +375,168 @@ describe('terminal.js · 运行中命令的边界（不变量）', () => {
     gate.resolve({ result: { exitCode: 0, signal: null, stdout: { text: '', truncated: false }, stderr: { text: '', truncated: false } }, cwd: '/tmp' })
     await sending
     registry.close('s1')
+  })
+})
+
+// ===========================================================================
+// 2c. finish 的命令生命周期记录（对话里保留终端卡片）
+// ===========================================================================
+
+describe('terminal.js · finish 追加 command/run + command/done（卡片记录）', () => {
+  it('R36 按 run → followup → done 顺序追加、同一 commandId、args=第一条命令、done.text=transcript', async () => {
+    const { registry, calls } = createRegistryFixture()
+    await registry.open('s1')
+    await registry.send('s1', 'echo one')
+    await registry.send('s1', 'echo two')
+
+    const result = await registry.finish('s1')
+
+    assert.deepEqual(
+      calls.append.map((entry) => entry.type),
+      ['command/run', 'command/done'],
+    )
+    const [run, done] = calls.append
+    assert.match(run.data.commandId, /^cmd-terminal-[0-9a-f-]{36}$/u)
+    assert.equal(run.data.commandId, done.data.commandId, 'run 与 done 必须共用同一 commandId')
+    assert.equal(run.data.name, 'cmd', "name 必须是 'cmd'（commandview 的 key）")
+    assert.equal(run.data.args, 'echo one', 'args 必须是第一条命令')
+    assert.deepEqual(run.data.source, { kind: 'user' })
+    assert.deepEqual(done.data, {
+      commandId: run.data.commandId,
+      kind: 'success',
+      text: '$ echo one\nhi\n$ echo two\nhi',
+    })
+    assert.deepEqual(calls.order, ['append:run', 'followup', 'append:done'])
+    assert.equal(result.sent, true)
+    assert.equal(registry.has('s1'), false, 'finish 成功后仍应删除 Host 会话状态')
+  })
+
+  it('R37 卡片记录不改变模型输入：followup 一次、text 不含 commandId/事件名/卡片正文之外的 header', async () => {
+    const { registry, calls } = createRegistryFixture()
+    await registry.send('s1', 'echo x')
+    await registry.finish('s1')
+
+    assert.equal(calls.followup, 1)
+    const message = calls.messages[0]
+    const commandId = calls.append[0].data.commandId
+    assert.equal(message.source.kind, 'shell-command')
+    assert.equal(message.source.command, 'echo x')
+    assert.equal(message.content[0].type, 'text')
+    assert.equal(message.content[0].text.includes(commandId), false)
+    assert.equal(message.content[0].text.includes('command/run'), false)
+    assert.equal(message.content[0].text.includes('command/done'), false)
+    // 模型文本仍然是既有 header + cwd + transcript，未被 append 污染。
+    assert.match(message.content[0].text, /interactive terminal session inside the DSH composer/u)
+    assert.match(message.content[0].text, /cwd: \/tmp\/dsh-shell-cmd-workspace/u)
+    assert.match(message.content[0].text, /\$ echo x/u)
+  })
+
+  it('R38 command/run 追加失败：不阻断 followup，且不补孤立 done', async () => {
+    const { registry, calls } = createRegistryFixture({ appendFailsFor: 'command/run' })
+    await registry.send('s1', 'echo x')
+
+    const result = await registry.finish('s1')
+
+    assert.deepEqual(calls.append.map((entry) => entry.type), ['command/run'])
+    assert.equal(calls.followup, 1)
+    assert.equal(result.sent, true)
+    assert.equal(registry.has('s1'), false)
+  })
+
+  it('R39 command/done 追加失败：finish 仍成功、followup 一次、状态删除', async () => {
+    const { registry, calls } = createRegistryFixture({ appendFailsFor: 'command/done' })
+    await registry.send('s1', 'echo x')
+
+    const result = await registry.finish('s1')
+
+    assert.deepEqual(calls.append.map((entry) => entry.type), ['command/run', 'command/done'])
+    assert.equal(calls.followup, 1)
+    assert.equal(result.sent, true)
+    assert.equal(registry.has('s1'), false)
+  })
+
+  it('R40 followup 抛错：补 kind=error 的 done（同一 commandId），错误原样抛出，状态保留', async () => {
+    const { registry, calls } = createRegistryFixture({ followupThrows: true })
+    await registry.send('s1', 'echo x')
+
+    await assert.rejects(() => registry.finish('s1'), /followup failed/u)
+
+    assert.deepEqual(calls.append.map((entry) => entry.type), ['command/run', 'command/done'])
+    assert.equal(calls.append[1].data.kind, 'error')
+    assert.equal(calls.append[0].data.commandId, calls.append[1].data.commandId)
+    assert.match(String(calls.append[1].data.text), /followup failed/u)
+    assert.equal(registry.has('s1'), true, '发送失败时不清理终端状态（原有语义）')
+  })
+
+  it('R41 close（Esc/点遮罩）绝不追加命令生命周期事件', async () => {
+    const { registry, calls } = createRegistryFixture()
+    await registry.open('s1')
+    await registry.send('s1', 'echo x')
+
+    assert.equal(registry.close('s1'), true)
+
+    assert.deepEqual(calls.append, [])
+    assert.equal(calls.followup, 0)
+    assert.deepEqual(calls.order, [])
+  })
+
+  it('R42 第二次 finish 不重复追加：返回 empty，append 数量不变', async () => {
+    const { registry, calls } = createRegistryFixture()
+    await registry.send('s1', 'echo x')
+    await registry.finish('s1')
+    const appended = calls.append.length
+
+    await assert.rejects(
+      () => registry.finish('s1'),
+      (error) => error.code === 'empty',
+    )
+    assert.equal(calls.append.length, appended)
+    assert.equal(calls.followup, 1)
+  })
+
+  it('R43 会话没有 session.append：finish 仍成功（best-effort）', async () => {
+    const { registry, calls } = createRegistryFixture({ sessionAppend: false })
+    await registry.send('s1', 'echo x')
+
+    const result = await registry.finish('s1')
+
+    assert.deepEqual(calls.append, [])
+    assert.equal(calls.followup, 1)
+    assert.equal(result.sent, true)
+    assert.equal(registry.has('s1'), false)
+  })
+})
+
+describe('Host 源码锁定 · 卡片记录契约（非行为验证）', () => {
+  it('R44 terminal.js finish 追加的事件形状 / best-effort / close 不追加', () => {
+    // 源码锁定：只对源码文本做断言，证明实现与 dsh commands 服务的事件形状一致，
+    // **不是**运行时行为验证（行为由 R36-R43 的伪 agent 覆盖）。
+    // 1) run 事件字段：commandId / name='cmd' / args=firstCommand / source.kind='user'
+    assert.match(TERMINAL_SOURCE, /appendCommandLifecycle\(agent, 'command\/run', \{/u)
+    assert.match(TERMINAL_SOURCE, /const commandId = `cmd-terminal-\$\{globalThis\.crypto\.randomUUID\(\)\}`/u)
+    assert.match(TERMINAL_SOURCE, /name: 'cmd',\s*\n\s*args: firstCommand,\s*\n\s*source: \{ kind: 'user' \}/u)
+    // 2) done 成功事件：kind='success'、text=transcript.text（不是 modelText / 说明头）
+    assert.match(TERMINAL_SOURCE, /appendCommandLifecycle\(agent, 'command\/done', \{\s*\n\s*commandId,\s*\n\s*kind: 'success',\s*\n\s*text: transcript\.text,/u)
+    // 3) followup 抛错路径补 kind='error' 的 done
+    assert.match(TERMINAL_SOURCE, /kind: 'error',\s*\n\s*text: error instanceof Error \? error\.message : String\(error\)/u)
+    // 4) 只有当 run 记录成功（recorded）时才补 done，避免孤儿事件
+    assert.match(TERMINAL_SOURCE, /if \(recorded\) \{[\s\S]{0,200}appendCommandLifecycle\(agent, 'command\/done'/u)
+    // 5) append 自身 try/catch 吞错（best-effort），且实现为 session.append(type, data)
+    const appendFn = TERMINAL_SOURCE.slice(
+      TERMINAL_SOURCE.indexOf('function appendCommandLifecycle'),
+      TERMINAL_SOURCE.indexOf('function createTerminalRegistry'),
+    )
+    assert.match(appendFn, /try \{/u)
+    assert.match(appendFn, /catch \{/u)
+    assert.match(appendFn, /session\.append\(type, data\)/u)
+    // 6) close 分支内没有任何 append（Esc 绝不产生卡片）
+    const closeStart = TERMINAL_SOURCE.indexOf('close(sessionId) {')
+    assert.ok(closeStart > 0)
+    const closeBlock = TERMINAL_SOURCE.slice(closeStart, TERMINAL_SOURCE.indexOf('dispose() {', closeStart))
+    assert.equal(closeBlock.includes('append'), false, 'close 分支不得追加命令事件')
+    // 7) modelText 仍只由 followup 使用；append 的 success text 直接取 transcript.text
+    assert.match(TERMINAL_SOURCE, /text: transcript\.text/u)
+    assert.doesNotMatch(TERMINAL_SOURCE, /appendCommandLifecycle\(agent, 'command\/done', \{[\s\S]{0,200}MODEL_HEADER/u)
   })
 })
 
@@ -682,8 +859,8 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /readOnly: busy \|\| sent/u)
   })
 
-  it('R31 package.json：版本 0.3.12 且声明 commandUi 客户端依赖', () => {
-    assert.equal(PACKAGE_JSON.version, '0.3.12')
+  it('R31 package.json：版本 0.3.13 且声明 commandUi 客户端依赖', () => {
+    assert.equal(PACKAGE_JSON.version, '0.3.13')
     const inject = PACKAGE_JSON?.dsh?.client?.inject
     assert.equal(Array.isArray(inject), true)
     assert.ok(inject.includes('@deepseek-ai/dsh-client-ui-commands'), '必须声明 @deepseek-ai/dsh-client-ui-commands')

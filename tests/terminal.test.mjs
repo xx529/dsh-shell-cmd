@@ -42,15 +42,36 @@ function makeRun({ stdout = '', stderr = '', exitCode = 0, ...rest } = {}) {
 /**
  * 终端测试夹具：伪 agents / workingDirectory + 可排队的 runShell。
  * runResults 里每一项可以是 makeRun(...)，也可以是返回 Promise 的函数。
+ *
+ * 生命周期记录相关：`agent.session.append` 的**每次尝试**记录到
+ * `calls.append`，`failAppendOn` 命中的事件类型会抛错，`session:false`
+ * 模拟没有会话（append 不可用）；`calls.order` 记录 append / followup 的
+ * 交错顺序，用于断言 `command/run → followup → command/done`。
  */
-function makeHarness({ runResults = [], titleThrows = false } = {}) {
-  const calls = { run: [], followup: [], title: [], ensure: [] }
+function makeHarness({
+  runResults = [],
+  titleThrows = false,
+  failAppendOn = null,
+  session = true,
+  followupThrows = false,
+} = {}) {
+  const calls = { run: [], followup: [], title: [], ensure: [], append: [], order: [] }
   const queue = [...runResults]
   const agents = new Map()
+  const append = (type, data) => {
+    calls.append.push({ type, data })
+    calls.order.push({ kind: 'append', type })
+    if (type === failAppendOn) throw new Error(`append ${type} failed`)
+    return { type, seq: calls.append.length - 1, time: Date.now(), data }
+  }
   const agent = {
     id: 's-1',
-    session: { id: 's-1' },
-    followup: (message) => calls.followup.push(message),
+    ...(session ? { session: { id: 's-1', append } } : {}),
+    followup: (message) => {
+      calls.order.push({ kind: 'followup' })
+      calls.followup.push(message)
+      if (followupThrows) throw new Error('followup failed')
+    },
   }
   agents.set('s-1', agent)
 
@@ -467,6 +488,150 @@ describe('createTerminalRegistry', () => {
     await h.registry.send('s-1', 'echo x')
     const snapshot = h.registry.read('s-1')
     assert.equal(terminalTranscript(snapshot), '$ echo x\nx')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 发送后的命令卡片记录（log-only 的 command 生命周期事件）
+// ---------------------------------------------------------------------------
+
+describe('交互终端发送后的命令卡片记录（command/run + command/done）', () => {
+  it('finish 按 run → followup → done 的顺序追加同一 commandId 的事件', async () => {
+    const h = makeHarness({
+      runResults: [makeRun({ stdout: 'one' }), makeRun({ stdout: 'two' })],
+    })
+    await h.registry.send('s-1', 'echo one')
+    await h.registry.send('s-1', 'echo two')
+
+    const result = await h.registry.finish('s-1')
+
+    assert.deepEqual(
+      h.calls.append.map((entry) => entry.type),
+      ['command/run', 'command/done'],
+    )
+    const [run, done] = h.calls.append
+    assert.match(run.data.commandId, /^cmd-terminal-/u)
+    assert.equal(run.data.commandId, done.data.commandId)
+    assert.equal(run.data.name, 'cmd')
+    assert.equal(run.data.args, 'echo one')
+    assert.deepEqual(run.data.source, { kind: 'user' })
+    // done.text 就是已经过 clip 的 transcript（卡片正文）。
+    assert.deepEqual(done.data, {
+      commandId: run.data.commandId,
+      kind: 'success',
+      text: '$ echo one\none\n$ echo two\ntwo',
+    })
+    // command/run 必须早于 followup，command/done 必须晚于 followup。
+    assert.deepEqual(
+      h.calls.order.map((entry) => (entry.kind === 'append' ? entry.type : entry.kind)),
+      ['command/run', 'followup', 'command/done'],
+    )
+    assert.equal(result.sent, true)
+  })
+
+  it('卡片记录不改变模型输入：followup 仍恰好一次，文本里没有 commandId', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
+    await h.registry.send('s-1', 'echo x')
+
+    await h.registry.finish('s-1')
+
+    assert.equal(h.calls.followup.length, 1)
+    const message = h.calls.followup[0]
+    const commandId = h.calls.append[0].data.commandId
+    assert.equal(message.source.kind, 'shell-command')
+    assert.equal(message.source.command, 'echo x')
+    assert.equal(message.content[0].type, 'text')
+    assert.equal(message.content[0].text.includes(commandId), false)
+    assert.equal(message.content[0].text.includes('command/run'), false)
+  })
+
+  it('command/run 追加失败不阻断发送：followup 照常，且不补孤立 done', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], failAppendOn: 'command/run' })
+    await h.registry.send('s-1', 'echo x')
+
+    const result = await h.registry.finish('s-1')
+
+    assert.deepEqual(
+      h.calls.append.map((entry) => entry.type),
+      ['command/run'],
+    )
+    assert.equal(h.calls.followup.length, 1)
+    assert.equal(result.sent, true)
+    assert.equal(h.registry.has('s-1'), false)
+  })
+
+  it('command/done 追加失败不影响 finish：仍 followup 并成功返回', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], failAppendOn: 'command/done' })
+    await h.registry.send('s-1', 'echo x')
+
+    const result = await h.registry.finish('s-1')
+
+    assert.deepEqual(
+      h.calls.append.map((entry) => entry.type),
+      ['command/run', 'command/done'],
+    )
+    assert.equal(h.calls.followup.length, 1)
+    assert.equal(result.sent, true)
+    assert.equal(h.registry.has('s-1'), false)
+  })
+
+  it('followup 抛错时补一条 kind=error 的 done，错误本身原样抛出', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], followupThrows: true })
+    await h.registry.send('s-1', 'echo x')
+
+    await assert.rejects(() => h.registry.finish('s-1'), /followup failed/u)
+
+    assert.deepEqual(
+      h.calls.append.map((entry) => entry.type),
+      ['command/run', 'command/done'],
+    )
+    assert.equal(h.calls.append[1].data.kind, 'error')
+    assert.equal(h.calls.append[0].data.commandId, h.calls.append[1].data.commandId)
+    // 发送失败不清理会话状态（原有错误语义不变）。
+    assert.equal(h.registry.has('s-1'), true)
+  })
+
+  it('关闭终端 / Esc（close）绝不追加任何命令事件', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
+    await h.registry.open('s-1')
+    await h.registry.send('s-1', 'echo x')
+
+    assert.equal(h.registry.close('s-1'), true)
+
+    assert.deepEqual(h.calls.append, [])
+    assert.equal(h.calls.followup.length, 0)
+    assert.equal(h.calls.order.length, 0)
+  })
+
+  it('finish 第二次（状态已删）不重复追加，而是返回 empty', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
+    await h.registry.send('s-1', 'echo x')
+    await h.registry.finish('s-1')
+    const appended = h.calls.append.length
+
+    await assert.rejects(
+      async () => {
+        try {
+          await h.registry.finish('s-1')
+        } catch (error) {
+          assert.equal(error.code, 'empty')
+          throw error
+        }
+      },
+      /run at least one command/u,
+    )
+    assert.equal(h.calls.append.length, appended)
+  })
+
+  it('会话没有 session.append 时 finish 仍成功（best-effort）', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], session: false })
+    await h.registry.send('s-1', 'echo x')
+
+    const result = await h.registry.finish('s-1')
+
+    assert.deepEqual(h.calls.append, [])
+    assert.equal(h.calls.followup.length, 1)
+    assert.equal(result.sent, true)
   })
 })
 

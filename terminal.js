@@ -149,6 +149,33 @@ export function terminalTranscript(state) {
 }
 
 /**
+ * 追加一条 log-only 的命令生命周期事件（只给 UI 卡片用）。
+ *
+ * 形状与 commands 服务 `execute()` 的 `appendLifecycle` 完全一致：
+ * `command/run` + `command/done` 是 dsh 已知事件类型，会话日志会原样记录，
+ * Chat 的 command Definition 把它们折叠成 `name='cmd'` 的 CommandNode，
+ * 浏览器半端的 `conversation.chat.commandview` 卡片据此渲染。
+ *
+ * **best-effort**：会话不可用、没有 `append` 或 append 抛错都只返回 false，
+ * 绝不阻断发送（`agent.followup`），也不把 finish 变成错误。
+ *
+ * @param {any} agent 接收命令的 Agent（需带 `session`）
+ * @param {string} type `command/run` | `command/done`
+ * @param {object} data 事件数据（需可 JSON 序列化）
+ * @returns {boolean} 是否成功追加
+ */
+function appendCommandLifecycle(agent, type, data) {
+  try {
+    const session = agent?.session
+    if (session === null || session === undefined || typeof session.append !== 'function') return false
+    session.append(type, data)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * 创建终端注册表。
  *
  * @param {any} ctx Host 插件上下文
@@ -332,6 +359,19 @@ export function createTerminalRegistry(ctx, deps) {
       const transcript = clipText(terminalTranscript(state), MAX_MODEL_CHARS)
       const firstCommand = state.commands.find((command) => command.trim().length > 0) ?? 'cmd'
       syncSessionTitle(ctx, agent, firstCommand)
+      // UI-only 的命令生命周期记录（log-only，不进入模型上下文）：
+      // 形状与 commands 服务的 execute() 完全一致（command/run → command/done），
+      // Chat 的 command Definition 会把它折叠成 name='cmd' 的 CommandNode，
+      // 浏览器半端的 commandview(key='cmd') 卡片因此保留一条「命令行 + transcript」。
+      // 模型输入仍然只走下面的 agent.followup()，这里只影响 UI/log 记录；
+      // 任何一步 append 失败都 best-effort 忽略，绝不阻断发送。
+      const commandId = `cmd-terminal-${globalThis.crypto.randomUUID()}`
+      const recorded = appendCommandLifecycle(agent, 'command/run', {
+        commandId,
+        name: 'cmd',
+        args: firstCommand,
+        source: { kind: 'user' },
+      })
       const modelText = [
         MODEL_HEADER,
         '',
@@ -340,7 +380,28 @@ export function createTerminalRegistry(ctx, deps) {
         transcript.text,
         ...(transcript.truncated ? ['', '[the transcript above was truncated for transport]'] : []),
       ].join('\n')
-      agent.followup(createShellCommandMessage(modelText, firstCommand))
+      try {
+        agent.followup(createShellCommandMessage(modelText, firstCommand))
+      } catch (error) {
+        // followup 失败时补一条 error 结算（与 commands 服务的 settleThrown 同语义），
+        // 避免日志里留下永远「运行中」的卡片；抛出的错误本身原样向外。
+        if (recorded) {
+          appendCommandLifecycle(agent, 'command/done', {
+            commandId,
+            kind: 'error',
+            text: error instanceof Error ? error.message : String(error),
+          })
+        }
+        throw error
+      }
+      if (recorded) {
+        // 只有 run 成功落日志时才补 done，避免孤儿 done 事件。
+        appendCommandLifecycle(agent, 'command/done', {
+          commandId,
+          kind: 'success',
+          text: transcript.text,
+        })
+      }
       state.sent = true
       const result = snapshot(state)
       states.delete(sessionId)
