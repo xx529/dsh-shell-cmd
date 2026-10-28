@@ -1,8 +1,9 @@
 /**
  * dsh-shell-cmd · 交互式命令终端（Host 半端逻辑）
  *
- * 由裸 `/cmd`（无参数）触发：浏览器半端在输入框上方打开终端面板，通过
- * `POST /cmd-terminal/rpc` 与这里交互。终端是一个**按行执行的 REPL**：
+ * 由裸 `/cmd`（无参数）触发：浏览器半端打开终端面板，通过共享 `/api` 桥上的
+ * 精确路由 `POST /api/cmd-terminal/rpc`（`createTerminalFetchRoute`）与这里交互。
+ * 终端是一个**按行执行的 REPL**：
  *
  * - 每条命令都走 `ctx.shell`，因此与 `/cmd <命令>` 一样是 `danger-full-access`
  *   （人类命令等价终端），受同一超时/取消/输出上限保护；
@@ -17,9 +18,6 @@
 
 /** 裸 `/cmd` 的命令结果标记：浏览器半端看到它就把输入与输出转成终端面板。 */
 export const OPEN_MARKER = '[[dsh-shell-cmd:terminal]]'
-
-/** 浏览器半端与 Host 之间的固定 HTTP RPC 路径。 */
-export const TERMINAL_ROUTE = '/cmd-terminal/rpc'
 
 /** 共享 `/api` 桥上的精确路由路径（客户端用相对 `api/cmd-terminal/rpc`）。 */
 export const TERMINAL_FETCH_PATH = '/api/cmd-terminal/rpc'
@@ -165,7 +163,7 @@ export function createTerminalRegistry(ctx, deps) {
   const { runShell, syncSessionTitle, createShellCommandMessage, clipText } = deps
   /** @type {Map<string, ReturnType<typeof createState>>} */
   const states = new Map()
-  /** 已请求打开、但浏览器半端尚未取走的会话（裸 /cmd 的宿主端信号）。 */
+  /** 已请求打开、但浏览器半端尚未消费的会话（裸 /cmd 的宿主端信号；status 只 peek）。 */
   const pendingOpens = new Set()
 
   /** 按 sessionId 解析仍存活的 Agent。 */
@@ -223,10 +221,14 @@ export function createTerminalRegistry(ctx, deps) {
       return true
     },
 
-    /** 浏览器半端轮询：取走一次打开请求，并报告是否已有终端状态。 */
+    /**
+     * 浏览器半端轮询 / 检查：**只读 peek**，不消费打开请求。
+     *
+     * 消费留给 `open()`：轮询可能重试（客户端 fetch 失败、面板渲染被卸载等），
+     * 若在 status 里取走请求，一次失败的 open 就会让终端永远打不开。
+     */
     status(sessionId) {
-      const pending = pendingOpens.delete(sessionId)
-      return { pendingOpen: pending === true, open: states.has(sessionId) }
+      return { pendingOpen: pendingOpens.has(sessionId), open: states.has(sessionId) }
     },
 
     read(sessionId) {
@@ -234,6 +236,12 @@ export function createTerminalRegistry(ctx, deps) {
       return state === undefined ? undefined : snapshot(state)
     },
 
+    /**
+     * 消费打开请求并幂等创建/返回终端状态（重复调用返回同一份状态）。
+     *
+     * 先消费再建状态：open 失败（例如 session-not-found）也把请求清掉，
+     * 避免浏览器半端轮询 status 时无限重试同一次无法完成的打开。
+     */
     async open(sessionId) {
       pendingOpens.delete(sessionId)
       const state = await ensureState(sessionId)
@@ -339,6 +347,7 @@ export function createTerminalRegistry(ctx, deps) {
       return { ...result, chars: modelText.length }
     },
 
+    /** 关闭终端：清掉挂起的打开请求与状态，并中止正在运行的命令。 */
     close(sessionId) {
       pendingOpens.delete(sessionId)
       const state = states.get(sessionId)
@@ -353,89 +362,38 @@ export function createTerminalRegistry(ctx, deps) {
         if (state.controller !== null) state.controller.abort(new Error('plugin unloaded'))
       }
       states.clear()
+      pendingOpens.clear()
     },
   }
 }
 
 // ---------------------------------------------------------------------------
-// HTTP JSON-RPC
+// 共享 `/api` 桥上的 JSON-RPC
 // ---------------------------------------------------------------------------
 
-/** 请求/响应上限。 */
-const MAX_REQUEST_BYTES = 64 * 1024
+/** 单次响应的上限（快照本身有界，这里是最后的传输保护）。 */
 const MAX_RESPONSE_BYTES = 256 * 1024
 
-/** 错误码 → HTTP 状态。 */
+/** JSON 响应头（RPC 结果不缓存）。 */
+const JSON_HEADERS = Object.freeze({
+  'content-type': 'application/json; charset=utf-8',
+  'cache-control': 'no-store',
+})
+
+/** 错误码 → HTTP 状态（未列出的错误码走 500）。 */
 const STATUS_BY_CODE = Object.freeze({
-  unauthorized: 401,
-  forbidden: 403,
   'bad-request': 400,
-  'too-large': 413,
   'session-not-found': 404,
   busy: 409,
   empty: 409,
 })
-
-/** 写 JSON 响应（写失败静默：对端断开属常态）。 */
-function sendJson(res, status, value, headers = {}) {
-  let body
-  try {
-    body = JSON.stringify(value)
-  } catch {
-    body = JSON.stringify({ ok: false, error: { code: 'internal', message: 'response not serializable' } })
-  }
-  try {
-    res.writeHead(status, {
-      'content-type': 'application/json; charset=utf-8',
-      'content-length': String(Buffer.byteLength(body, 'utf8')),
-      'cache-control': 'no-store',
-      ...headers,
-    })
-  } catch {
-    // 头已发出
-  }
-  try {
-    res.end(body)
-  } catch {
-    // 对端断开
-  }
-}
-
-/** 读取并解析 JSON 请求体。 */
-async function readJsonBody(req, maxBytes) {
-  const chunks = []
-  let total = 0
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    total += buffer.length
-    if (total > maxBytes) {
-      const error = new Error('request body too large')
-      error.code = 'too-large'
-      throw error
-    }
-    chunks.push(buffer)
-  }
-  const text = Buffer.concat(chunks).toString('utf8')
-  if (text.length === 0) {
-    const error = new Error('empty request body')
-    error.code = 'bad-request'
-    throw error
-  }
-  try {
-    return JSON.parse(text)
-  } catch {
-    const error = new Error('request body is not valid JSON')
-    error.code = 'bad-request'
-    throw error
-  }
-}
 
 /** 参数对象化。 */
 function paramsOf(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
-/** 业务错误（HTTP 与 `/api` RPC 共用；RPC 信封要求 details 字段）。 */
+/** 业务错误（RPC 信封要求 details 字段）。 */
 function fail(code, message) {
   return { ok: false, error: { code, ...(message === undefined ? {} : { message }), details: {} } }
 }
@@ -472,87 +430,28 @@ async function dispatch(registry, method, params) {
 }
 
 /**
- * 创建 `POST /cmd-terminal/rpc` 的 handler。
- *
- * @param {{ registry: any, authReject?: (req: any) => number | undefined, logger?: any }} options
- * @returns {(req: any, res: any) => Promise<void>}
+ * 序列化 JSON 响应；超过上限时降级为 500 错误信封（不把巨型响应塞进桥）。
+ * @param {any} value 响应体
+ * @param {number} status HTTP 状态
+ * @returns {Response}
  */
-export function createTerminalRpcHandler(options) {
-  const registry = options.registry
-  const authReject = typeof options.authReject === 'function' ? options.authReject : () => undefined
-  const logger = options.logger ?? {}
-
-  return async function terminalRpcHandler(req, res) {
-    try {
-      let rejection
-      try {
-        rejection = authReject(req)
-      } catch (error) {
-        logger?.warn?.('[dsh-shell-cmd] terminal auth check failed:', error?.message ?? error)
-        rejection = 403
-      }
-      if (rejection !== undefined && rejection !== null) {
-        sendJson(res, typeof rejection === 'number' ? rejection : 401, fail('unauthorized'))
-        return
-      }
-      if (req.method !== 'POST') {
-        sendJson(res, 405, fail('method', 'only POST is supported'), { allow: 'POST' })
-        return
-      }
-      const contentType = String(req.headers?.['content-type'] ?? '').toLowerCase()
-      if (!contentType.startsWith('application/json')) {
-        sendJson(res, 415, fail('bad-request', 'content-type must be application/json'))
-        return
-      }
-      let body
-      try {
-        body = await readJsonBody(req, MAX_REQUEST_BYTES)
-      } catch (error) {
-        const code = error?.code === 'too-large' ? 'too-large' : 'bad-request'
-        sendJson(res, code === 'too-large' ? 413 : 400, fail(code, error?.message))
-        return
-      }
-      const method = body !== null && typeof body === 'object' ? body.method : undefined
-      if (typeof method !== 'string' || method.length === 0) {
-        sendJson(res, 400, fail('bad-request', 'method is required'))
-        return
-      }
-      let result
-      try {
-        result = await dispatch(registry, method, paramsOf(body?.params))
-      } catch (error) {
-        logger?.warn?.(`[dsh-shell-cmd] terminal ${method} failed:`, error?.message ?? error)
-        result = fail('internal', 'unexpected host-side failure')
-      }
-      if (result.ok !== true) {
-        const code = typeof result.error?.code === 'string' ? result.error.code : 'internal'
-        sendJson(res, STATUS_BY_CODE[code] ?? 500, result)
-        return
-      }
-      const json = JSON.stringify(result)
-      if (Buffer.byteLength(json, 'utf8') > MAX_RESPONSE_BYTES) {
-        sendJson(res, 500, fail('internal', 'terminal response too large'))
-        return
-      }
-      sendJson(res, 200, result)
-    } catch (error) {
-      logger?.warn?.('[dsh-shell-cmd] terminal rpc crashed:', error?.message ?? error)
-      try {
-        sendJson(res, 500, fail('internal', 'internal transport failure'))
-      } catch {
-        // 对端断开
-      }
-    }
+function jsonResponse(value, status) {
+  const body = JSON.stringify(value)
+  if (Buffer.byteLength(body, 'utf8') > MAX_RESPONSE_BYTES) {
+    return new Response(JSON.stringify(fail('internal', 'terminal response too large')), {
+      status: 500,
+      headers: JSON_HEADERS,
+    })
   }
+  return new Response(body, { status, headers: JSON_HEADERS })
 }
-
-
 
 /**
  * 创建挂到 `ctx.connection.fetch` 的精确路由。
  *
  * 浏览器半端用相对地址 `api/cmd-terminal/rpc` 调用；Web 与 Desktop 都由
- * connection 的 `/api` 桥处理（Electron 通过 IPC 桥，页面 origin 不参与）。
+ * connection 的 `/api` 桥处理（Electron 通过 IPC 桥，页面 origin 不参与），
+ * 认证由桥本身完成，因此这里不再重复做鉴权栅栏。
  *
  * @param {any} registry `createTerminalRegistry()` 的返回值
  * @returns {(request: Request) => Promise<Response>}
@@ -567,14 +466,9 @@ export function createTerminalFetchRoute(registry) {
     }
     const box = paramsOf(body)
     const method = typeof box.method === 'string' ? box.method : ''
-    if (method.length === 0) {
-      return Response.json(fail('bad-request', 'method is required'), {
-        status: 400,
-        headers: { 'cache-control': 'no-store' },
-      })
-    }
+    if (method.length === 0) return jsonResponse(fail('bad-request', 'method is required'), 400)
     const result = await dispatch(registry, method, paramsOf(box.params))
     const status = result.ok === true ? 200 : (STATUS_BY_CODE[result.error?.code] ?? 500)
-    return Response.json(result, { status, headers: { 'cache-control': 'no-store' } })
+    return jsonResponse(result, status)
   }
 }

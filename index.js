@@ -22,10 +22,8 @@
 
 import {
   OPEN_MARKER,
-  TERMINAL_ROUTE,
   TERMINAL_FETCH_PATH,
   createTerminalRegistry,
-  createTerminalRpcHandler,
   createTerminalFetchRoute,
 } from './terminal.js'
 
@@ -325,8 +323,12 @@ function optionalService(ctx, name) {
 }
 
 /**
- * 交互终端模式是否可用：需要 `webServer`（注册 RPC 路由）、`connection`（认证栅栏）
- * 与 `agents`（按 sessionId 找 Agent）。三者缺一时裸 `/cmd` 仍返回用法错误。
+ * 交互终端模式是否可用：需要 `connection.fetch.register`（共享 `/api` 桥上的精确
+ * 路由）与 `agents`（按 sessionId 找 Agent）。缺一时裸 `/cmd` 仍返回用法错误。
+ *
+ * 不再要求 `webServer`：根路径 `/cmd-terminal/rpc` 在当前桌面 profile 实测未注册
+ * （GET 404 / POST 405），唯一传输是 `connection.fetch` 的 `/api` 精确路由。
+ *
  * @param {any} ctx Host 插件上下文
  * @returns {boolean}
  */
@@ -371,8 +373,8 @@ export async function runShell(ctx, agent, command, signal, timeoutMs = DEFAULT_
  * `/cmd` 的处理逻辑（与注册分离，便于测试）。
  *
  * - `/cmd <命令>`：执行并把命令与输出发给模型（原行为）。
- * - 裸 `/cmd`：返回 `OPEN_MARKER`，浏览器半端据此在输入框上方打开交互终端；
- *   终端内的命令与 Ctrl+Enter 发送由 `/cmd-terminal/rpc` 处理。
+ * - 裸 `/cmd`：返回 `OPEN_MARKER`，浏览器半端据此打开交互终端；
+ *   终端内的命令与 Ctrl+Enter 发送由共享 `/api` 桥上的 `/api/cmd-terminal/rpc` 处理。
  *
  * @param {any} ctx 插件上下文
  * @param {{ agent: any, rawInput: string, signal: AbortSignal }} invocation 命令调用
@@ -436,7 +438,7 @@ export async function executeShellCommand(ctx, invocation, options = {}) {
 }
 
 /**
- * 注册 `/cmd` 与交互终端 RPC。
+ * 注册 `/cmd`，并在 `connection.fetch` 上挂交互终端的 `/api` 精确路由。
  * @param {any} ctx 插件上下文
  * @param {any} [config] 行配置（可选 timeoutMs / maxOutputChars / nameSession / useSessionPolicy）
  */
@@ -448,7 +450,7 @@ export function apply(ctx, config = {}) {
     ...(config?.useSessionPolicy === true ? { useSessionPolicy: true } : {}),
   }
 
-  // 交互终端：状态与 RPC（浏览器半端通过 POST /cmd-terminal/rpc 驱动）。
+  // 交互终端：状态与 RPC（浏览器半端通过 POST /api/cmd-terminal/rpc 驱动）。
   const registry = createTerminalRegistry(ctx, {
     runShell,
     syncSessionTitle,
@@ -458,13 +460,13 @@ export function apply(ctx, config = {}) {
   options.terminalRegistry = registry
   ctx.effect(() => () => registry.dispose(), 'dsh-shell-cmd: terminal registry')
 
-  const webServer = optionalService(ctx, 'webServer')
-  const connection = optionalService(ctx, 'connection')
-
-  // 首选传输：`connection.fetch` 的 `/api` 精确路由（参考 dsh-context）。
+  // 唯一传输：`connection.fetch` 的 `/api` 精确路由（参考 dsh-context）。
   // 必须通过 `ctx.inject(['connection'])` 获取：connection 可能在 web-app 的
   // realm/子上下文里，直接 `ctx.get('connection')` 拿不到时路由就不会注册，
   // 浏览器端表现为 404。
+  //
+  // 不再注册 `webServer` 根路径 `/cmd-terminal/rpc`：该路径在当前 profile 实测
+  // 不可达（GET 404 / POST 405），浏览器半端只使用 `/api` 精确路由。
   let terminalRouteReady = false
   ctx.inject(['connection'], (child) => {
     const service = typeof child.get === 'function' ? child.get('connection') : undefined
@@ -487,20 +489,6 @@ export function apply(ctx, config = {}) {
     }, 'dsh-shell-cmd: terminal route readiness')
   })
   options.isTerminalReady = () => terminalRouteReady
-  if (webServer !== undefined && webServer !== null && typeof webServer.register === 'function') {
-    const handler = createTerminalRpcHandler({
-      registry,
-      authReject:
-        connection !== undefined && connection !== null && typeof connection.requestRejection === 'function'
-          ? (req) => connection.requestRejection({ headers: req.headers })
-          : undefined,
-      logger: ctx.logger,
-    })
-    ctx.effect(
-      () => webServer.register({ kind: 'exact', path: TERMINAL_ROUTE, handler }),
-      'dsh-shell-cmd: terminal rpc route',
-    )
-  }
 
   ctx.commands.register({
     name: 'cmd',

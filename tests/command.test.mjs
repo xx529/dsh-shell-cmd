@@ -32,7 +32,7 @@ import {
   apply,
 } from '../index.js'
 
-import { OPEN_MARKER, TERMINAL_ROUTE } from '../terminal.js'
+import { OPEN_MARKER, TERMINAL_FETCH_PATH } from '../terminal.js'
 
 // ---------------------------------------------------------------------------
 // 测试夹具
@@ -522,12 +522,10 @@ describe('executeShellCommand', () => {
     assert.equal(h.followups.length, 0)
   })
 
-  it('裸 /cmd：有 web 服务时返回终端打开标记、记录打开请求，不执行命令、不 followup', async () => {
-    const routes = []
+  it('裸 /cmd：终端传输就绪时返回打开标记、记录打开请求，不执行命令、不 followup', async () => {
     const opened = []
     const h = makeHarness({
-      webServer: { register: (route) => (routes.push(route), () => {}) },
-      connection: { requestRejection: () => undefined, fetch: { register: () => () => {} } },
+      connection: { fetch: { register: () => () => {} } },
       agents: { get: () => undefined },
     })
 
@@ -544,22 +542,47 @@ describe('executeShellCommand', () => {
     assert.equal(h.resolveCalls.length, 0)
     assert.equal(h.executeCalls.length, 0)
     assert.equal(h.followups.length, 0)
-    assert.equal(routes.length, 0) // 路由由 apply 注册，这里只验证标记
   })
 
-  it('isTerminalModeAvailable 需要 webServer + connection + agents 三者齐全', () => {
-    const none = makeHarness()
-    assert.equal(isTerminalModeAvailable(none.ctx), false)
+  it('裸 /cmd：终端传输未就绪时返回 usage，不记录打开请求', async () => {
+    const opened = []
+    const h = makeHarness()
 
-    const missingAgents = makeHarness({
-      webServer: { register: () => () => {} },
-      connection: { requestRejection: () => undefined, fetch: { register: () => () => {} } },
-    })
-    assert.equal(isTerminalModeAvailable(missingAgents.ctx), false)
+    const out = await executeShellCommand(
+      h.ctx,
+      { agent: h.agent, rawInput: '', signal: undefined },
+      { terminalRegistry: { requestOpen: (sessionId) => (opened.push(sessionId), true) } },
+    )
+
+    assert.deepEqual(out, { kind: 'error', text: USAGE })
+    assert.deepEqual(opened, [])
+  })
+
+  it('isTerminalModeAvailable 只要求 agents + connection.fetch.register', () => {
+    assert.equal(isTerminalModeAvailable(makeHarness().ctx), false)
+
+    // 只有 agents：缺 connection.fetch
+    assert.equal(
+      isTerminalModeAvailable(makeHarness({ agents: { get: () => undefined } }).ctx),
+      false,
+    )
+    // 只有 connection（没有 fetch / 没有 register）
+    assert.equal(
+      isTerminalModeAvailable(makeHarness({ connection: { requestRejection: () => undefined } }).ctx),
+      false,
+    )
+    assert.equal(
+      isTerminalModeAvailable(makeHarness({ connection: { fetch: {} } }).ctx),
+      false,
+    )
+    // 旧实现的 webServer 不再能单独让终端模式可用
+    assert.equal(
+      isTerminalModeAvailable(makeHarness({ webServer: { register: () => () => {} } }).ctx),
+      false,
+    )
 
     const complete = makeHarness({
-      webServer: { register: () => () => {} },
-      connection: { requestRejection: () => undefined, fetch: { register: () => () => {} } },
+      connection: { fetch: { register: () => () => {} } },
       agents: { get: () => undefined },
     })
     assert.equal(isTerminalModeAvailable(complete.ctx), true)
@@ -1186,13 +1209,13 @@ describe('apply', () => {
     assert.equal(h.followups[0].source.command, 'echo big')
   })
 
-  it('有 web 服务时注册 /cmd-terminal/rpc 路由，并让裸 /cmd 返回打开标记', async () => {
+  it('只注册 connection.fetch 的 /api 精确路由（不再注册 webServer 根路径），裸 /cmd 返回打开标记', async () => {
     const registered = []
     const fetchRoutes = []
     const h = makeHarness({
+      // webServer 仍注入：即使存在也不应再被注册（根路径在本 profile 不可达）。
       webServer: { register: (route) => (h.routes.push(route), () => {}) },
       connection: {
-        requestRejection: () => undefined,
         fetch: {
           register: (route) => {
             fetchRoutes.push(route)
@@ -1208,23 +1231,41 @@ describe('apply', () => {
     }
     apply(ctx)
 
-    assert.equal(h.routes.length, 1)
-    assert.equal(h.routes[0].kind, 'exact')
-    assert.equal(h.routes[0].path, TERMINAL_ROUTE)
-    assert.equal(typeof h.routes[0].handler, 'function')
+    assert.equal(h.routes.length, 0)
     assert.equal(fetchRoutes.length, 1)
-    assert.equal(fetchRoutes[0].path, '/api/cmd-terminal/rpc')
+    assert.equal(fetchRoutes[0].path, TERMINAL_FETCH_PATH)
     assert.deepEqual(fetchRoutes[0].methods, ['POST'])
     assert.equal(fetchRoutes[0].requestBody, 'buffered')
     assert.equal(typeof fetchRoutes[0].fetch, 'function')
 
+    // 路由的 handler 可直接处理一次 status 调用（伪 Request）。
+    const response = await fetchRoutes[0].fetch(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'status', params: { sessionId: h.session.id } }),
+      }),
+    )
+    assert.equal(response.status, 200)
+    assert.deepEqual((await response.json()).value, { pendingOpen: false, open: false })
+
     const out = await registered[0].handler({ agent: h.agent, rawInput: '', signal: undefined })
     assert.deepEqual(out, { kind: 'success', text: OPEN_MARKER })
+
+    // 裸 /cmd 记录一次打开请求（Client 轮询 status 可读到 pendingOpen）。
+    const afterOpen = await fetchRoutes[0].fetch(
+      new Request('http://host/api/cmd-terminal/rpc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ method: 'status', params: { sessionId: h.session.id } }),
+      }),
+    )
+    assert.deepEqual((await afterOpen.json()).value, { pendingOpen: true, open: false })
   })
 
-  it('没有 web 服务时只注册命令、不注册终端路由', () => {
+  it('没有 connection 时只注册命令、不注册终端路由，裸 /cmd 返回 usage', async () => {
     const registered = []
-    const h = makeHarness()
+    const h = makeHarness({ webServer: { register: () => () => {} } })
     const ctx = {
       ...h.ctx,
       commands: { register: (definition) => registered.push(definition) },
@@ -1233,5 +1274,8 @@ describe('apply', () => {
 
     assert.equal(registered.length, 1)
     assert.equal(h.routes.length, 0)
+
+    const out = await registered[0].handler({ agent: h.agent, rawInput: '', signal: undefined })
+    assert.deepEqual(out, { kind: 'error', text: USAGE })
   })
 })

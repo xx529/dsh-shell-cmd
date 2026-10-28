@@ -3,7 +3,7 @@
 DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 
 - `/cmd <终端命令>`：**先执行命令**，再把「命令 + 输出」一起发给模型，并在对话里以**终端卡片**渲染；
-- 裸 `/cmd`：在输入框上方打开**交互终端**，逐条执行命令，按 **Ctrl+Enter** 把整段终端内容发给模型。
+- 裸 `/cmd`：直接打开**交互终端模态**（背景模糊、居中卡片），逐条执行命令，按 **Ctrl+Enter** 把整段终端内容发给模型。
 
 对标 Claude Code 的 `!<command>` 能力，区别是这里会把命令与输出明确交给模型，并要求模型据此回复。
 
@@ -23,7 +23,7 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 ```
 
 - 命令卡片：等宽字体、`$` 提示符、状态胶囊（执行中 / 退出码 / 超时 / 取消）、可展开的长输出、复制按钮。
-- 交互终端：裸 `/cmd` 打开面板，Enter 逐条执行、Ctrl+Enter 发送给模型、Esc 关闭（详见下文）。
+- 交互终端：裸 `/cmd` + Enter 直接打开模态（token 被消费、草稿自动清空，体验与 `/context` 一致），Enter 逐条执行、Ctrl+Enter 发送给模型、Esc / 点遮罩关闭（详见下文）。
 - 输入提示：输入框草稿进入 `/cmd` 模式时，下方出现「终端命令模式」提示条。
 - 模型输入：一条 user 消息，正文包含「用户手动执行了此命令」、命令原文、cwd、退出状态与 stdout/stderr。
 - 会话标题：**仅当 `/cmd` 是对话第一个动作时**，用命令本身命名会话（见「会话标题规则」）。
@@ -46,6 +46,7 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 1. 在输入框键入 `/`，从命令菜单选择 **cmd**（或直接输入 `/cmd `），菜单会显示命令说明与输入提示。
 2. 在 `/cmd ` 之后写终端命令，回车提交。命令在**当前会话工作目录**执行。
 3. 命令结束后，模型会自动收到命令与输出并给出回复。
+4. 只输入 `/cmd` 并回车（不带命令）：立即打开交互终端模态，草稿自动清空（见「交互终端模式」）。
 
 示例：
 
@@ -71,7 +72,7 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 
 ### 交互终端模式（裸 `/cmd`）
 
-只输入 `/cmd` 并回车（**不带命令**），输入框下方会打开一个交互终端面板（与输入框同宽）：
+只输入 `/cmd` 并回车（**不带命令**），会像 `/context` 一样立即打开一个**居中模态**（不再是输入框下方的 dock）：
 
 ```
 ┌ 交互终端   cwd /Users/me/project                      [就绪] [关闭] ┐
@@ -84,12 +85,39 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
   Enter 执行 · Ctrl+C 中断 · Ctrl+Enter 发送给模型 · Esc 关闭
 ```
 
+**打开方式**
+
+- 插件通过 `ctx.commandUi.decorate` 给 Host 的 `cmd` 命令挂一个 **bare 调用 action**；
+  裸 `/cmd` + Enter 时，commands 客户端先**消费掉 `/cmd` token**（草稿自动清空、不提交任何消息），
+  再执行 action 打开模态——与 `/context` 的体验一致。
+- 因此不会再出现旧版本的两个问题：「面板提前打开」（claim 阶段就打开）和
+  「Esc 关闭后草稿仍是 `/cmd`、又被 claim 副作用重开」。`/cmd <命令>` 仍走 Host 正常执行，装饰只作用于 bare 调用。
+- 兜底路径（旧 Host 或装饰未生效时）：commandview 看到裸 `/cmd` 的 `[[dsh-shell-cmd:terminal]]` 标记后打开
+  （按 `commandId`/`seq` 去重，回放历史不会重复弹出），以及面板关闭时低频轮询 Host `status` 的 `pendingOpen`。
+
+**外观**
+
+- 注册在 `conversation.input.overlay` 槽位（session 作用域，`id='shell-cmd-terminal'`，`order:20`）。
+- 打开时渲染全屏遮罩：`position:fixed; inset:0; z-index:200`，背景 `var(--dsw-alias-bg-mask-1)`，
+  `backdrop-filter: blur(3px)`（含 `-webkit-` 前缀）；卡片居中，`width:min(860px,100%)`、
+  `max-height:min(82vh,720px)`，圆角 12px、`--dsw-shadow-lv3` 阴影。
+- 样式只用 `--dsw-alias-*` 主题令牌，明暗主题自动跟随。
+
+**关闭方式**
+
+- `Esc`：面板打开期间在 `document` 上注册**捕获阶段** `keydown` 监听（输入法 composing 时忽略），
+  preventDefault + stopPropagation 后关闭；终端输入框内的 `Esc` 也走同一关闭逻辑（关闭动作有 80ms 幂等去重，不会重复发 RPC）。
+- 点击卡片外的遮罩关闭；卡片内的点击不会误关。
+- 点击右上角「关闭」按钮。
+- 关闭动作：best-effort 调用 RPC `close`（失败忽略）→ 收起模态 → **若输入框草稿 trim 后仍是 `/cmd` 就清空**
+  （正常 action 路径草稿已被消费，这里只是防御旧路径残留）。
+
 | 快捷键 | 行为 |
 | --- | --- |
 | `Enter` | 执行当前输入行，输出追加到终端滚动区；执行结束后焦点仍在输入行 |
 | `Ctrl+C` | 命令执行中 → 中断（abort）；空闲时清空输入行 |
-| `Ctrl+Enter` | 把整段终端内容作为对话输入发给模型；发送成功后终端面板自动消失 |
-| `Esc` | 关闭面板（未发送的内容丢弃） |
+| `Ctrl+Enter` | 把整段终端内容作为对话输入发给模型；发送成功后终端模态自动消失 |
+| `Esc` | 关闭模态（未发送的内容丢弃） |
 
 终端内行为：
 
@@ -97,15 +125,37 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 - `cd` 单独处理并跨命令保留当前目录；`export NAME=VALUE` / `unset NAME` 会影响后续命令；
 - 输出按行保存在有界滚动区（最多 1200 行 / 96 KiB），只适合**按行执行**的命令；
   全屏交互程序（vim、top、需要 TTY 的程序）不支持；长命令执行期间显示「执行中…」；
-- 命令执行期间输入行保持可聚焦（readOnly），结束后焦点自动回到输入行；
+- 命令执行期间输入行保持可聚焦（readOnly，不用 disabled），结束后焦点自动回到输入行；输出区自动滚到底部；
+- 传输失败（Host 未连接、会话未就绪、超时等）会在模态内按**错误码本地化**展示，并提供**重试**按钮，
+  不会再只丢一个 `Failed to fetch`；
 - **只有 Ctrl+Enter 才会把终端内容和命令卡片一起送到模型**：`Esc`/关闭只删除 Host 侧终端状态，不产生任何模型消息；裸 `/cmd` 的 `command/run`/`command/done` 是 log-only 事件，同样不进模型历史；
-- `Ctrl+Enter` 后模型收到「用户在一个交互终端里执行了这些命令」的说明 + cwd + 完整 transcript；发送成功后终端面板立即关闭；
+- `Ctrl+Enter` 后模型收到「用户在一个交互终端里执行了这些命令」的说明 + cwd + 完整 transcript；发送成功后终端模态立即关闭；
   这次发送如果发生在对话开头，同样会用第一条命令命名会话；
-- 面板按会话隔离；切换会话会自动关闭当前面板的显示（未发送的终端状态随会话保留，直到关闭/发送）。
+- 面板按会话隔离；切换会话不会把当前面板带到别的会话（未发送的终端状态随会话保留，直到关闭/发送）。
 
-底层实现：Host 注册 `POST /cmd-terminal/rpc`（`terminal.js`，经 `webServer.register` + `connection` 认证栅栏），
-浏览器半端在 `conversation.input.dock` 槽位渲染面板；裸 `/cmd` 的 `CommandResult.text` 只含一个
-`[[dsh-shell-cmd:terminal]]` 标记，命令行卡片对这类结果不渲染。
+**传输**
+
+- Host 侧只保留 `ctx.connection.fetch.register` 的精确路由 `POST /api/cmd-terminal/rpc`（`terminal.js`）；
+  `webServer.register` 的根路径 `/cmd-terminal/rpc` 已删除（实测不可达：GET 404 / POST 405）。
+- 浏览器半端用**页面相对地址**调用：
+
+  ```js
+  fetch('api/cmd-terminal/rpc', {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method, params: { sessionId, ... } }),
+    signal: AbortSignal.timeout(15000),   // send 覆盖执行时长，单独放宽
+  })
+  ```
+
+- 关键点：**禁止**用 `__DSH_TRANSPORT__.streamBaseUrl` 或 `document.baseURI` 拼绝对地址。桌面端页面 origin 是
+  `dsh-app://app`，而 `streamBaseUrl` 是 `http://127.0.0.1:<port>`，拼出来就是跨源请求 → 浏览器直接
+  `TypeError: Failed to fetch`。Web/Desktop 壳会把非静态路径 forward 给 Host 并注入认证 cookie（与 dsh-context 的
+  `api/dsh-context/…` 同款），认证由桥本身完成。
+- 响应不是 JSON / 非 `ok` / 超时 / 网络错误时，统一抛出带 `code` 的错误；模态内按 code 显示本地化文案
+  （如 `session-not-found` → 「会话尚未就绪」），并可重试。
 
 ### 会话标题规则
 
@@ -214,15 +264,17 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
 [Client] conversation.chat.commandview，key = "cmd"  →  终端卡片
 
 方式 B：裸 /cmd（交互终端）
-裸 /cmd ──[Host]──> CommandResult.text = "[[dsh-shell-cmd:terminal]]"
-        │
+裸 /cmd + Enter
+        │  [Client] ctx.commandUi.decorate 的 bare action：消费 token（草稿清空、不提交消息）
         ▼
-[Client] commandview 看到标记 → 打开 conversation.input.dock 面板
-        │  Enter → POST /cmd-terminal/rpc { method:"send", text } → ctx.shell 执行
-        │  Ctrl+C → { method:"cancel" }；Esc → { method:"close" }
+[Client] conversation.input.overlay 居中模态（Esc / 点遮罩 / 关闭按钮）
+        │  Enter → POST api/cmd-terminal/rpc { method:"send", text } → ctx.shell 执行
+        │  Ctrl+C → { method:"cancel" }；Esc/关闭 → { method:"close" }
         │  Ctrl+Enter → { method:"finish" }
         ▼
 [Host terminal.js] 读滚动区 → agent.followup(transcript) → 终端状态删除
+
+兜底触发：旧 Host 的 OPEN_MARKER（commandview 按 commandId/seq 去重）/ status 轮询 pendingOpen
 ```
 
 关键契约：
@@ -230,8 +282,9 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
 - Host 半端导出 `{ name, inject, apply }`，`inject = ['commands', 'shell', 'workingDirectory']`；缺失任一服务时插件保持 inactive 而不是抛错。`sessionTitle` / `webServer` / `connection` / `agents` 均为可选服务（`ctx.get`），缺失时只降级对应能力。
 - **不静态 import 任何 `@deepseek-ai/*` 核心包**：本地链接安装的插件在工作区内无法解析 dsh 安装内的包。UserMessage 按 `createUserMessage()` 的等价结构就地构造（`id` / `role` / `content` / `source`）。
 - Client 半端是 `window.__ModuleLoader__` 的懒工厂 classic script，只能 `require('react')`，无 JSX；样式经 `<style data-plugin-css>` 注入并在 `ctx.effect` 中清理。
-- 卡片注册在 `conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点），不替换任何内置渲染器；终端面板注册在 `conversation.input.dock`。
-- 终端 RPC 由 Host 通过 `webServer.register({ kind:'exact', path:'/cmd-terminal/rpc' })` 暴露，并用 `connection.requestRejection` 做认证栅栏；浏览器半端只做同源 `fetch`。
+- 卡片注册在 `conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点），不替换任何内置渲染器；交互终端模态注册在 `conversation.input.overlay`（`id='shell-cmd-terminal'`，session 作用域），提示条仍在 `conversation.composer.dock`。
+- 裸 `/cmd` 的打开走 `ctx.commandUi.decorate({ name:'cmd', ui:{ kind:'action', run } })`：`/context` 同款路径，token 被消费后才执行 action；装饰只对 bare 调用生效，`/cmd <args>` 仍由 Host 命令执行。
+- 终端 RPC 由 Host 通过 `ctx.connection.fetch.register({ path:'/api/cmd-terminal/rpc', methods:['POST'], requestBody:'buffered' })` 暴露；浏览器半端用**页面相对地址** `fetch('api/cmd-terminal/rpc', { credentials:'same-origin', cache:'no-store' })` 调用，绝不拼 `__DSH_TRANSPORT__.streamBaseUrl` / `document.baseURI` 绝对地址（那会跨源 → `Failed to fetch`）。
 - 所有颜色走 `--dsw-alias-*` 主题令牌，明暗主题与主题切换自动跟随。
 
 ### 模型看到的输入（示意）
@@ -265,10 +318,21 @@ exit: 0
 ## 开发与验证
 
 ```bash
-npm run check   # node --check index.js && node --check client.js
+npm run check   # node --check index.js && node --check client.js && node --check terminal.js
 npm test        # node --test "tests/**/*.test.mjs"  （Host 半端纯函数、执行路径与会话标题单测）
 npm run verify  # check + test
 ```
+
+## 排错
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 交互终端里报 `Failed to fetch` | 旧版把 RPC 拼成 `http://127.0.0.1:<port>/…` 绝对地址，桌面端 `dsh-app://app` 页面发起就是跨源。0.3.12 起改为页面相对 `api/cmd-terminal/rpc`；确认已刷新页面（client.js 变更需刷新，无 HMR） |
+| 裸 `/cmd` 按回车面板不打开 | 先确认 `/cmd` 在命令菜单里且插件行 active；打开由 `ctx.commandUi.decorate` 的 bare action 触发，`dsh.client.inject` 需含 `@deepseek-ai/dsh-client-ui-commands`，改后刷新页面。装饰不可用时仍有兜底：commandview 的 OPEN_MARKER（15s 内、按 commandId/seq 去重）与关闭状态下的 `status` 轮询 |
+| 面板关不掉 / Esc 无反应 | Esc 由 document 捕获阶段监听处理（输入法 composing 时忽略），点遮罩或「关闭」按钮也可；若 RPC 失败仍会本地收起模态（close 为 best-effort） |
+| 打开后立即报「会话尚未就绪」 | Host 侧 `session-not-found`：会话还没就绪或已被关闭，稍后点「重试」；Host 侧 `/api/cmd-terminal/rpc` 路由需由 `connection.fetch` 注册成功（404 时检查插件是否 active / 是否需重载 Host） |
+| 终端里命令跑但看不到输出 | 看模态内错误行是否显示 `busy` / `session-not-found`；确认命令是**按行执行**的（全屏 TUI 不支持），长命令执行期间状态为「执行中…」 |
+| 发送给模型后卡片/面板重复出现 | 只有 Ctrl+Enter 会 `finish`；Esc/关闭只清 Host 终端状态，不产生模型消息。若旧版本残留卡片，刷新页面即可 |
 
 ## 已知边界
 

@@ -1,9 +1,10 @@
 /**
  * dsh-shell-cmd · 交互终端（Host 半端）单元测试
  *
- * 覆盖 terminal.js 的注册表行为（open/read/send/cancel/finish/close）、cd/export
- * 处理、模型消息组装，以及 HTTP RPC handler 的传输/鉴权/分派语义。
- * 全程使用伪 ctx / runShell / req / res，不 spawn 真进程、不联网。
+ * 覆盖 terminal.js 的注册表行为（status peek / open 消费 / read / send /
+ * cancel / finish / close）、cd/export 处理、模型消息组装，以及共享 `/api` 桥
+ * 精确路由 `createTerminalFetchRoute` 的分派/错误码语义。
+ * 全程使用伪 ctx / runShell / Request，不 spawn 真进程、不联网。
  */
 
 import { describe, it } from 'node:test'
@@ -11,10 +12,8 @@ import assert from 'node:assert/strict'
 
 import {
   OPEN_MARKER,
-  TERMINAL_ROUTE,
   terminalTranscript,
   createTerminalRegistry,
-  createTerminalRpcHandler,
   createTerminalFetchRoute,
   TERMINAL_FETCH_PATH,
 } from '../terminal.js'
@@ -45,7 +44,7 @@ function makeRun({ stdout = '', stderr = '', exitCode = 0, ...rest } = {}) {
  * runResults 里每一项可以是 makeRun(...)，也可以是返回 Promise 的函数。
  */
 function makeHarness({ runResults = [], titleThrows = false } = {}) {
-  const calls = { run: [], followup: [], title: [] }
+  const calls = { run: [], followup: [], title: [], ensure: [] }
   const queue = [...runResults]
   const agents = new Map()
   const agent = {
@@ -57,7 +56,10 @@ function makeHarness({ runResults = [], titleThrows = false } = {}) {
 
   const ctx = {
     workingDirectory: {
-      ensure: async () => '/tmp/work',
+      ensure: async (agentArg, signal) => {
+        calls.ensure.push({ agentArg, signal })
+        return '/tmp/work'
+      },
     },
     get: (name) => {
       if (name === 'agents') return { get: (id) => agents.get(id) }
@@ -90,44 +92,28 @@ function makeHarness({ runResults = [], titleThrows = false } = {}) {
   return { registry, deps, calls, agent, queue }
 }
 
-/** 构造伪 IncomingMessage。 */
-function makeReq({ method = 'POST', headers = { 'content-type': 'application/json' }, body = undefined } = {}) {
-  return {
-    method,
-    headers,
-    async *[Symbol.asyncIterator]() {
-      if (body !== undefined) yield Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
-    },
-  }
-}
-
-/** 构造伪 ServerResponse。 */
-function makeRes() {
-  return {
-    statusCode: 0,
-    headers: null,
-    body: '',
-    writeHead(status, headers) {
-      this.statusCode = status
-      this.headers = headers
-    },
-    end(body) {
-      this.body = body
-    },
-  }
-}
-
-/** 调用一次 RPC handler。 */
-async function callRpc(handler, { req, ...options } = {}) {
-  const res = makeRes()
-  await handler(options.req ?? req ?? makeReq(), res)
+/**
+ * 用 `/api` 精确路由发一次 RPC，返回状态码与解析后的 JSON 信封。
+ * @param {(request: Request) => Promise<Response>} route
+ * @param {any} payload 请求体（对象按 JSON 序列化；字符串原样发出；undefined 发空体）
+ */
+async function callRoute(route, payload) {
+  const body =
+    payload === undefined ? undefined : typeof payload === 'string' ? payload : JSON.stringify(payload)
+  const response = await route(
+    new Request('http://host/api/cmd-terminal/rpc', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body }),
+    }),
+  )
   let json = null
   try {
-    json = JSON.parse(res.body)
+    json = await response.json()
   } catch {
     json = null
   }
-  return { status: res.statusCode, headers: res.headers, json, raw: res.body }
+  return { status: response.status, headers: response.headers, json }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,9 +121,9 @@ async function callRpc(handler, { req, ...options } = {}) {
 // ---------------------------------------------------------------------------
 
 describe('terminal 常量', () => {
-  it('暴露裸 /cmd 的打开标记与固定 RPC 路径', () => {
+  it('暴露裸 /cmd 的打开标记与共享 /api 桥上的精确路由路径', () => {
     assert.equal(OPEN_MARKER, '[[dsh-shell-cmd:terminal]]')
-    assert.equal(TERMINAL_ROUTE, '/cmd-terminal/rpc')
+    assert.equal(TERMINAL_FETCH_PATH, '/api/cmd-terminal/rpc')
   })
 })
 
@@ -358,30 +344,110 @@ describe('createTerminalRegistry', () => {
     await running
   })
 
-  it('requestOpen / status 传递并消费一次打开请求', () => {
+  it('status 是只读 peek：重复轮询不会消费打开请求', () => {
     const h = makeHarness()
 
     assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
     assert.equal(h.registry.requestOpen('s-1'), true)
+    // 轮询允许重试：连查三次都应报告 pendingOpen，请求留给 open 消费。
     assert.deepEqual(h.registry.status('s-1'), { pendingOpen: true, open: false })
-    // 第二次读取已被取走
-    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: true, open: false })
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: true, open: false })
   })
 
-  it('open 会清除挂起的打开请求', async () => {
+  it('requestOpen 拒绝空 sessionId', () => {
+    const h = makeHarness()
+    assert.equal(h.registry.requestOpen(''), false)
+    assert.equal(h.registry.requestOpen(undefined), false)
+    assert.deepEqual(h.registry.status(undefined), { pendingOpen: false, open: false })
+  })
+
+  it('open 消费挂起的打开请求', async () => {
     const h = makeHarness()
     h.registry.requestOpen('s-1')
     await h.registry.open('s-1')
     assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: true })
   })
 
-  it('close 移除会话状态', async () => {
+  it('open 失败（session-not-found）同样消费请求，避免轮询无限重试', async () => {
     const h = makeHarness()
+    h.registry.requestOpen('missing')
+
+    await assert.rejects(() => h.registry.open('missing'), /session not found/u)
+    assert.deepEqual(h.registry.status('missing'), { pendingOpen: false, open: false })
+  })
+
+  it('重复 open 幂等：复用同一份状态，不重置滚动区 / cwd / 重新解析工作目录', async () => {
+    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
     await h.registry.open('s-1')
+    await h.registry.send('s-1', 'echo x')
+    const before = h.registry.read('s-1')
+
+    const again = await h.registry.open('s-1')
+
+    assert.deepEqual(again.lines, ['$ echo x', 'x'])
+    assert.deepEqual(again.commands, ['echo x'])
+    assert.deepEqual(again, before)
+    // ensureState 只在第一次 open 时解析 cwd
+    assert.equal(h.calls.ensure.length, 1)
+  })
+
+  it('close 清理挂起请求与状态（没有状态时也清请求）', async () => {
+    const h = makeHarness()
+    h.registry.requestOpen('s-1')
+    await h.registry.open('s-1')
+    h.registry.requestOpen('s-1')
+
     assert.equal(h.registry.close('s-1'), true)
-    assert.equal(h.registry.close('s-1'), false)
     assert.equal(h.registry.has('s-1'), false)
     assert.equal(h.registry.read('s-1'), undefined)
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
+
+    // 第二次 close：没有状态，返回 false，但同样清掉挂起请求。
+    h.registry.requestOpen('s-1')
+    assert.equal(h.registry.close('s-1'), false)
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
+  })
+
+  it('close 中止运行中的命令并清理状态（不 followup）', async () => {
+    let release
+    const pending = new Promise((resolve) => {
+      release = resolve
+    })
+    const h = makeHarness({
+      runResults: [
+        ({ signal }) =>
+          pending.then(() => {
+            assert.equal(signal.aborted, true)
+            return makeRun({ stdout: 'stopped', aborted: true, exitCode: null })
+          }),
+      ],
+    })
+    const running = h.registry.send('s-1', 'sleep')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const signal = h.calls.run[0].signal
+    assert.equal(signal.aborted, false)
+
+    assert.equal(h.registry.close('s-1'), true)
+    assert.equal(signal.aborted, true)
+    assert.equal(h.registry.has('s-1'), false)
+
+    release()
+    await running
+    assert.equal(h.calls.followup.length, 0)
+  })
+
+  it('dispose 清空状态与挂起的打开请求', async () => {
+    const h = makeHarness()
+    h.registry.requestOpen('s-1')
+    await h.registry.open('s-1')
+    h.registry.requestOpen('s-2')
+
+    h.registry.dispose()
+
+    assert.deepEqual(h.registry.status('s-1'), { pendingOpen: false, open: false })
+    assert.deepEqual(h.registry.status('s-2'), { pendingOpen: false, open: false })
+    assert.equal(h.registry.has('s-1'), false)
   })
 
   it('close（Esc）只丢弃终端内容：不 followup、不改标题', async () => {
@@ -405,195 +471,139 @@ describe('createTerminalRegistry', () => {
 })
 
 // ---------------------------------------------------------------------------
-// HTTP RPC
+// 共享 `/api` 桥上的精确路由
 // ---------------------------------------------------------------------------
 
 describe('createTerminalFetchRoute（/api 精确路由）', () => {
-  it('暴露 /api 路由路径常量', () => {
-    assert.equal(TERMINAL_FETCH_PATH, '/api/cmd-terminal/rpc')
-  })
-
-  it('POST open/send 返回 JSON Response', async () => {
+  it('open/send 成功时返回 200、ok 信封与 no-store 头', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
     const route = createTerminalFetchRoute(h.registry)
 
-    const opened = await route(
-      new Request('http://host/api/cmd-terminal/rpc', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ method: 'open', params: { sessionId: 's-1' } }),
-      }),
-    )
+    const opened = await callRoute(route, { method: 'open', params: { sessionId: 's-1' } })
     assert.equal(opened.status, 200)
-    const openedBody = await opened.json()
-    assert.equal(openedBody.ok, true)
-    assert.equal(openedBody.value.cwd, '/tmp/work')
+    assert.equal(opened.headers.get('content-type'), 'application/json; charset=utf-8')
+    assert.equal(opened.headers.get('cache-control'), 'no-store')
+    assert.equal(opened.json.ok, true)
+    assert.equal(opened.json.value.cwd, '/tmp/work')
+    assert.deepEqual(opened.json.value.lines, [])
 
-    const sent = await route(
-      new Request('http://host/api/cmd-terminal/rpc', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ method: 'send', params: { sessionId: 's-1', text: 'echo x' } }),
-      }),
-    )
+    const sent = await callRoute(route, { method: 'send', params: { sessionId: 's-1', text: 'echo x' } })
     assert.equal(sent.status, 200)
-    assert.deepEqual((await sent.json()).value.lines, ['$ echo x', 'x'])
+    assert.deepEqual(sent.json.value.lines, ['$ echo x', 'x'])
   })
 
-  it('非法 JSON / 缺少 method / 未知方法返回 4xx JSON', async () => {
+  it('status 分派是只读 peek：连续查询都返回 pendingOpen，open 之后才清零', async () => {
+    const h = makeHarness()
+    const route = createTerminalFetchRoute(h.registry)
+    h.registry.requestOpen('s-1')
+
+    const first = await callRoute(route, { method: 'status', params: { sessionId: 's-1' } })
+    const second = await callRoute(route, { method: 'status', params: { sessionId: 's-1' } })
+    assert.deepEqual(first.json.value, { pendingOpen: true, open: false })
+    assert.deepEqual(second.json.value, { pendingOpen: true, open: false })
+
+    await callRoute(route, { method: 'open', params: { sessionId: 's-1' } })
+    const after = await callRoute(route, { method: 'status', params: { sessionId: 's-1' } })
+    assert.deepEqual(after.json.value, { pendingOpen: false, open: true })
+  })
+
+  it('read 在无状态时返回 null，close 返回 closed 结果', async () => {
     const h = makeHarness()
     const route = createTerminalFetchRoute(h.registry)
 
-    for (const body of ['{oops', JSON.stringify({ params: { sessionId: 's-1' } }), JSON.stringify({ method: 'nope', params: { sessionId: 's-1' } })]) {
-      const response = await route(
-        new Request('http://host/api/cmd-terminal/rpc', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body,
-        }),
-      )
-      assert.equal(response.status, 400)
+    const read = await callRoute(route, { method: 'read', params: { sessionId: 's-1' } })
+    assert.equal(read.status, 200)
+    assert.equal(read.json.value, null)
+
+    await callRoute(route, { method: 'open', params: { sessionId: 's-1' } })
+    const closed = await callRoute(route, { method: 'close', params: { sessionId: 's-1' } })
+    assert.equal(closed.status, 200)
+    assert.deepEqual(closed.json.value, { closed: true })
+  })
+
+  it('非法 JSON / 缺少 method / 未知方法返回 400 bad-request', async () => {
+    const h = makeHarness()
+    const route = createTerminalFetchRoute(h.registry)
+
+    for (const payload of [
+      '{oops',
+      undefined,
+      '[]',
+      JSON.stringify({ params: { sessionId: 's-1' } }),
+      JSON.stringify({ method: 'nope', params: { sessionId: 's-1' } }),
+    ]) {
+      const result = await callRoute(route, payload)
+      assert.equal(result.status, 400)
+      assert.equal(result.json.ok, false)
+      assert.equal(result.json.error.code, 'bad-request')
     }
   })
 
-  it('会话不存在映射 404', async () => {
+  it('缺少 sessionId 返回 400，错误信封带 details 字段', async () => {
     const h = makeHarness()
     const route = createTerminalFetchRoute(h.registry)
-    const missing = await route(
-      new Request('http://host/api/cmd-terminal/rpc', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ method: 'open', params: { sessionId: 'missing' } }),
-      }),
-    )
+
+    const result = await callRoute(route, { method: 'open', params: {} })
+    assert.equal(result.status, 400)
+    assert.equal(result.json.error.code, 'bad-request')
+    assert.deepEqual(result.json.error.details, {})
+  })
+
+  it('会话不存在映射 404 session-not-found', async () => {
+    const h = makeHarness()
+    const route = createTerminalFetchRoute(h.registry)
+
+    const missing = await callRoute(route, { method: 'open', params: { sessionId: 'missing' } })
     assert.equal(missing.status, 404)
-  })
-})
-
-describe('createTerminalRpcHandler', () => {
-  const makeHandler = (h) =>
-    createTerminalRpcHandler({
-      registry: h.registry,
-      logger: { warn() {} },
-    })
-
-  it('POST open 返回快照', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'open', params: { sessionId: 's-1' } } }),
-    })
-
-    assert.equal(result.status, 200)
-    assert.equal(result.json.ok, true)
-    assert.equal(result.json.value.cwd, '/tmp/work')
-    assert.deepEqual(result.json.value.lines, [])
+    assert.equal(missing.json.error.code, 'session-not-found')
+    assert.deepEqual(missing.json.error.details, {})
   })
 
-  it('未知方法返回 400 bad-request', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'nope', params: { sessionId: 's-1' } } }),
+  it('busy / empty 映射 409', async () => {
+    let release
+    const pending = new Promise((resolve) => {
+      release = resolve
     })
+    const h = makeHarness({
+      runResults: [() => pending.then(() => makeRun({ stdout: 'done' }))],
+    })
+    const route = createTerminalFetchRoute(h.registry)
+    const running = h.registry.send('s-1', 'sleep')
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
-    assert.equal(result.status, 400)
-    assert.equal(result.json.ok, false)
-    assert.equal(result.json.error.code, 'bad-request')
+    const busy = await callRoute(route, { method: 'finish', params: { sessionId: 's-1' } })
+    assert.equal(busy.status, 409)
+    assert.equal(busy.json.error.code, 'busy')
+    release()
+    await running
+
+    const emptyHarness = makeHarness()
+    const emptyRoute = createTerminalFetchRoute(emptyHarness.registry)
+    const empty = await callRoute(emptyRoute, { method: 'finish', params: { sessionId: 's-1' } })
+    assert.equal(empty.status, 409)
+    assert.equal(empty.json.error.code, 'empty')
   })
 
-  it('缺少 sessionId 返回 400', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'open', params: {} } }),
-    })
-
-    assert.equal(result.status, 400)
-    assert.equal(result.json.error.code, 'bad-request')
-  })
-
-  it('会话不存在时返回 404 session-not-found', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'open', params: { sessionId: 'missing' } } }),
-    })
-
-    assert.equal(result.status, 404)
-    assert.equal(result.json.error.code, 'session-not-found')
-  })
-
-  it('非 POST 返回 405', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ method: 'GET', body: undefined }),
-    })
-
-    assert.equal(result.status, 405)
-  })
-
-  it('错误 Content-Type 返回 415', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ headers: { 'content-type': 'text/plain' }, body: 'x' }),
-    })
-
-    assert.equal(result.status, 415)
-  })
-
-  it('非法 JSON 返回 400', async () => {
-    const h = makeHarness()
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: '{oops' }),
-    })
-
-    assert.equal(result.status, 400)
-    assert.equal(result.json.error.code, 'bad-request')
-  })
-
-  it('认证栅栏拒绝时返回 401', async () => {
-    const h = makeHarness()
-    const handler = createTerminalRpcHandler({
-      registry: h.registry,
-      authReject: () => 401,
-      logger: { warn() {} },
-    })
-    const result = await callRpc(handler, {
-      req: makeReq({ body: { method: 'open', params: { sessionId: 's-1' } } }),
-    })
-
-    assert.equal(result.status, 401)
-    assert.equal(result.json.error.code, 'unauthorized')
-  })
-
-  it('status 分派返回 pendingOpen / open', async () => {
-    const h = makeHarness()
-    h.registry.requestOpen('s-1')
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'status', params: { sessionId: 's-1' } } }),
-    })
-
-    assert.equal(result.status, 200)
-    assert.deepEqual(result.json.value, { pendingOpen: true, open: false })
-  })
-
-  it('send 分派到注册表并返回新行', async () => {
-    const h = makeHarness({ runResults: [makeRun({ stdout: 'hi' })] })
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'send', params: { sessionId: 's-1', text: 'echo hi' } } }),
-    })
-
-    assert.equal(result.status, 200)
-    assert.deepEqual(result.json.value.lines, ['$ echo hi', 'hi'])
-  })
-
-  it('finish 分派并返回 chars', async () => {
+  it('finish 分派成功返回 sent/chars 并 followup 一次', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
+    const route = createTerminalFetchRoute(h.registry)
     await h.registry.send('s-1', 'echo x')
-    const result = await callRpc(makeHandler(h), {
-      req: makeReq({ body: { method: 'finish', params: { sessionId: 's-1' } } }),
-    })
 
+    const result = await callRoute(route, { method: 'finish', params: { sessionId: 's-1' } })
     assert.equal(result.status, 200)
     assert.equal(result.json.value.sent, true)
     assert.equal(typeof result.json.value.chars, 'number')
     assert.equal(h.calls.followup.length, 1)
+  })
+
+  it('响应超过 256 KiB 时降级为 500，而不是把巨型 JSON 塞进桥', async () => {
+    const route = createTerminalFetchRoute({
+      status: () => ({ pendingOpen: false, open: false, blob: 'x'.repeat(300 * 1024) }),
+    })
+
+    const result = await callRoute(route, { method: 'status', params: { sessionId: 's-1' } })
+    assert.equal(result.status, 500)
+    assert.equal(result.json.ok, false)
+    assert.equal(result.json.error.code, 'internal')
   })
 })

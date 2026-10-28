@@ -41,15 +41,15 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 | 路径 | 作用 |
 | --- | --- |
-| `index.js` | **Host 半端**：`/cmd` 命令注册、shell 执行、正文组装、`agent.followup()`、会话标题同步、终端 RPC 路由装配 |
-| `terminal.js` | **交互终端 Host 逻辑**：按行 REPL、cwd/export 保持、transcript 组装、`/cmd-terminal/rpc` handler |
-| `client.js` | **Client 半端**：`window.__ModuleLoader__` 懒工厂；终端卡片、`/cmd` 模式提示条、交互终端面板（`conversation.input.dock`） |
+| `index.js` | **Host 半端**：`/cmd` 命令注册、shell 执行、正文组装、`agent.followup()`、会话标题同步、终端 `/api` 路由装配 |
+| `terminal.js` | **交互终端 Host 逻辑**：按行 REPL、cwd/export 保持、transcript 组装、终端状态机（`status` 只读 peek / `open` 消费 / `close` 清理）、共享 `/api` 桥上的 `POST /api/cmd-terminal/rpc` 路由（`createTerminalFetchRoute`） |
+| `client.js` | **Client 半端**：`window.__ModuleLoader__` 懒工厂；终端卡片、`/cmd` 模式提示条、交互终端模态（`conversation.input.overlay`） |
 | `cordis.patch.yml` | bundle patch：插入一行 Host 插件（`include:shell-cmd`） |
 | `package.json` | bundle 声明（`dsh.bundle.patch`）、`dsh.client` 声明、`exports`/`files` |
 | `locale/{en,zh}.json` | 插件管理页的 `meta.title` / `meta.description` |
 | `icon.svg` | 插件图标（原创，≤256 KiB） |
 | `tests/command.test.mjs` | `/cmd` 命令、标题、沙箱、apply 单测（伪 ctx/agent/shell） |
-| `tests/terminal.test.mjs` | 终端注册表与 RPC handler 单测（伪 runShell/req/res，不 spawn、不联网） |
+| `tests/terminal.test.mjs` | 终端注册表与 `/api` 路由单测（伪 runShell/`Request`，不 spawn、不联网） |
 | `scripts/publish-install.sh` | 推送 + 仓库安装 + 校验脚本 |
 | `README.md` | 面向用户的功能/安装/边界说明 |
 
@@ -93,15 +93,16 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - `useSessionPolicy: true` → 用 `ctx.sandboxPolicy.resolve({ session })`，与模型 bash 工具同边界；
    - 环境变量由 `dsh-bash-local` 决定：`bash -c` + 进程 env + `NO_COLOR/TERM=dumb/PAGER=cat/GIT_PAGER=cat` 覆盖，不加载用户 shell rc。改这一块前先读该包。
 10. **交互终端（裸 `/cmd`）**：
-   - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`）并记录一次打开请求（`registry.requestOpen`）。Client 有两条触发路径：commandview 看到标记（快路径）与 `conversation.input.dock` 轮询 `status`（兜底，处理卡片未渲染/拿不到 sessionId 的情况）；卡片本身不渲染。
-   - RPC：共享 `/api` 精确路由——Host `ctx.connection.fetch.register({path:'/api/cmd-terminal/rpc', methods:['POST'], requestBody:'buffered', fetch})`，Client 相对地址 `fetch('api/cmd-terminal/rpc', POST JSON)`（与 dsh-context 的 `/api/dsh-context/attachment` 完全同款；Web/Electron 都由 connection carrier 处理）。`connection.rpc.handle` 依赖调用方 context 的 webServer，`rpc.intercept('/api')` 被 api-gateway 占用，均不可用。根路径 `webServer.register('/cmd-terminal/rpc')` 保留为手工回退。
+   - Host：裸 `/cmd` 返回 `OPEN_MARKER`（`[[dsh-shell-cmd:terminal]]`）并记录一次打开请求（`registry.requestOpen`）；`registry.status` 是**只读 peek**（不消费打开请求），消费由 `registry.open` 完成（重复 `open` 幂等复用同一份状态），`registry.close` 清掉挂起请求与状态并 abort 运行中命令。卡片本身不渲染。
+   - 触发：主路径是 Client 侧 `commandUi.decorate` 给 Host 命令 `cmd` 挂的 bare action（`ctx.inject(['commandUi'])` → `decorate({ name:'cmd', available:()=>true, ui:{ kind:'action', run:(session)=>open(session.sessionId) } })`，与 `/context` 同款，token 被消费、草稿清空）；`package.json` 的 `dsh.client.inject` 必须包含 `@deepseek-ai/dsh-client-ui-commands`。兜底 1：commandview 看到裸 `/cmd` 的 `OPEN_MARKER`（只对 15s 内的新记录生效，按 `commandId:seq` 去重）；兜底 2：模态关闭时低频轮询 Host `status.pendingOpen`。
+   - RPC：只保留共享 `/api` 精确路由——Host `ctx.connection.fetch.register({path:'/api/cmd-terminal/rpc', methods:['POST'], requestBody:'buffered', fetch})`，Client 相对地址 `fetch('api/cmd-terminal/rpc', POST JSON)`（与 dsh-context 的 `/api/dsh-context/attachment` 完全同款；Web/Electron 都由 connection carrier 处理，认证由桥本身完成，路由层不再返回 401/405/415）。**webServer 根路径 `/cmd-terminal/rpc` 已删除**（本 profile 实测不可达：GET 404 / POST 405），`createTerminalRpcHandler` 与 `TERMINAL_ROUTE` 一并移除；`connection.rpc.handle`（依赖调用方 context 的 webServer）与 `rpc.intercept('/api')`（被 api-gateway 占用）仍不可用。
    - 执行：每条命令复用 `runShell`（`danger-full-access`）；`cd`/`export`/`unset` 由 `terminal.js` 单独处理以跨命令保持；滚动区有界（1200 行 / 96 KiB）。
    - 发送：`finish` 读滚动区 → `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态；对话开头用第一条命令命名会话。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
    - 焦点：命令执行期间输入行用 `readOnly`（不要 `disabled`，否则焦点被浏览器移走），执行结束后 effect 把焦点还给输入行。
-   - 布局：面板注册在 `conversation.composer.dock`（输入框下方、与输入框同宽），`width:100%; box-sizing:border-box`。
-   - 轮询：命令被 claim（`/cmd` 被认领且无参数）时立即打开面板；提交后 8s 内以 180ms 快速轮询 `status`，其余时间 1.2s 低频兜底。
-   - 记录：任何带 OPEN_MARKER 的空参数 cmd 结果都**不渲染卡片**（否则 Esc 关闭后会留下一条莫名卡片）。
-   - 语义边界：只有 `finish`（Ctrl+Enter）调用 `agent.followup`；`close`（Esc）只 abort 运行中命令并删除终端状态，**绝不 followup**。`command/run` / `command/done` 是 log-only，不经模型。修改这两条路径时必须保持该不变量，并有测试覆盖。
+   - 布局：交互终端注册在 `conversation.input.overlay`（session 作用域），渲染全屏遮罩 + 居中卡片模态（`position:fixed; inset:0; z-index:200`、`backdrop-filter:blur(3px)`；点遮罩关闭，卡片内点击 `stopPropagation`）；`/cmd` 模式提示条 `ShellCmdHint` 仍注册在 `conversation.composer.dock`。
+   - 轮询：**不在 claim 阶段自动打开**（否则 Esc 关闭后草稿仍是 `/cmd`，会被 claim 副作用立刻重开）；打开只由 commandUi action（主）/ OPEN_MARKER（兜底）触发。`status` 轮询仅在模态关闭时跑：`submitting` / `claimed` 相位进入后 8s 内按 180ms 快速轮询，其余时间 1.2s 低频兜底，且只读 `pendingOpen`。
+   - 记录：任何带 OPEN_MARKER 的空参数 cmd 结果都**不渲染卡片**（否则 Esc 关闭后会留下一条莫名卡片）。裸 `/cmd` 的主触发是 client 侧 commandUi action；OPEN_MARKER（commandview）与 status 轮询只是兜底。
+   - 语义边界：只有 `finish`（Ctrl+Enter）调用 `agent.followup`；`close`（Esc / 点遮罩）只 abort 运行中命令并删除终端状态，**绝不 followup**（Esc 路径：best-effort `close` RPC → 收起模态 → 若草稿仍是 `/cmd` 用 `inputActions.setDraft('')` 清残留）。`command/run` / `command/done` 是 log-only，不经模型。修改这两条路径时必须保持该不变量，并有测试覆盖。
    - 限制：按行 REPL，不支持全屏 TUI / 真 TTY；不要把它改成 `ctx.terminals`（PTY 受会话沙箱限制，与人类命令的 danger-full-access 语义冲突）。
 
 ## 5. 修改指南
@@ -115,10 +116,10 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 117 例全绿）。
-- Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`req`/`res`，不得 spawn 真进程或联网。
+- 提交前：`npm run check && npm test`（当前 115 例全绿；新增 `tests/regression/**` 后以 `npm test` 实际统计为准）。
+- Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`Request`/`Response`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
-- 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`。
+- 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` 下 root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`；root=`conversation.input.overlay` 应出现 occupant id=`shell-cmd-terminal`；root=`conversation.composer.dock` 应出现 id=`shell-cmd-hint`。
 - 无浏览器控制时，视觉只能人工确认：如实报告“插槽已注册、视觉未验证”，不要用 mock 页面/截图工具伪造验证。
 - 禁止用 `plugin_manager` 以外的方式手改 profile 的 `package.json` / `cordis.patch.yml`；`scripts/publish-install.sh` 走官方 CLI `dsh plugin --profile <name> add <spec>`，由它回写 bundle 列表。
 
@@ -153,8 +154,9 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 | 会话名不变 | 预期行为：仅“对话刚开始的第一次 `/cmd`”命名会话；对话中途、第二次 `/cmd`、已有标题/活动时都不改名。检查 `sessionTitle` 服务与 `nameSession` 配置 |
 | `/cmd` 报 `Operation not permitted` / `cannot open .git/FETCH_HEAD` | 沙箱策略被部署默认值接管：确认 `shell.resolve` 请求里带 `mode: 'danger-full-access'`（`resolveShellSandboxPolicy`）；见第 4 节第 9 条 |
 | 环境变量与终端不一致 | 已知设计：`bash -c` + DSH 进程 env，不加载 shell rc；用 `zsh -lc '…'` / 显式 `source` 兜底 |
-| 裸 `/cmd` 不打开终端面板 | 面板由两条路径触发（标记 / `status` 轮询）；确认 `/cmd-terminal/rpc` 可访问、页面已刷新、`conversation.input.dock` occupant 存在；Host 侧 `requestOpen` 是否被调用 |
-| 终端 RPC 401/403 | `webServer` 未注册路由或 `connection.requestRejection` 拒绝；检查 `isTerminalModeAvailable` 与页面认证 |
+| 裸 `/cmd` 不打开终端面板 | 主触发是 client 侧 `commandUi` bare action（需页面刷新后生效）；兜底是 OPEN_MARKER（15s 内、按 `commandId:seq` 去重）与模态关闭时的 `status` 轮询。依次确认：`conversation.input.overlay` occupant id=`shell-cmd-terminal` 存在、Host 的 `/api/cmd-terminal/rpc` 精确路由已注册（`isTerminalModeAvailable`：agents + `connection.fetch.register`）、Host 侧 `requestOpen` 被调用且 `status.pendingOpen===true` |
+| 终端 RPC 401/403 | 认证由 connection 的 `/api` 桥完成（路由层不再做 `requestRejection` 栅栏，也不再返回 401/405/415）：401/403 表示页面认证失效/未带 cookie，刷新页面或重新登录；路由未注册时表现为 404/`not found`，检查 `isTerminalModeAvailable` 与 `connection.fetch.register` |
+| 终端报 `Failed to fetch` / network | Client 必须用**页面相对地址** `fetch('api/cmd-terminal/rpc')`：Desktop 页面 origin 是 `dsh-app://app`，用 `__DSH_TRANSPORT__.streamBaseUrl`（`http://127.0.0.1:<port>`）拼绝对地址会变成跨源请求被浏览器拒绝。检查 `client.js` 的 `TERMINAL_RPC` 常量与 `terminalRpc()` 是否被绝对化 |
 | 终端面板打开但命令无输出 | 看 Host 返回的 error（busy/session-not-found）；确认 `agents.get(sessionId)` 能解析到活 Agent |
 | 安装后缺文件 | `package.json` 的 `files` 是否覆盖新增文件；仓库安装按 `files` 打包 |
 | 插件行 active 但命令报错 | Host 侧 `apply` 抛错会被回滚；看 `.plugin-manager/logs` 或重载后的 fiber 状态 |
