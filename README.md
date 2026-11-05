@@ -98,9 +98,13 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 **外观**
 
 - 注册在 `conversation.input.overlay` 槽位（session 作用域，`id='shell-cmd-terminal'`，`order:20`）。
-- 打开时渲染全屏遮罩：`position:fixed; inset:0; z-index:200`，背景 `var(--dsw-alias-bg-mask-1)`，
-  `backdrop-filter: blur(3px)`（含 `-webkit-` 前缀）；卡片居中，`width:min(860px,100%)`、
-  `max-height:min(82vh,720px)`，圆角 12px、`--dsw-shadow-lv3` 阴影。
+- 打开时渲染遮罩：CSS 兜底 `position:fixed; inset:0; z-index:200`，运行时按**会话区域**改写边界；
+  背景 `var(--dsw-alias-bg-mask-1)`，`backdrop-filter: blur(3px)`（含 `-webkit-` 前缀）；
+  卡片居中，`width:min(860px,100%)`、`max-height:min(82vh,720px)`，圆角 12px、`--dsw-shadow-lv3` 阴影。
+- 遮罩与卡片按会话区域定位：基准是最近的 `[data-conversation-content]`（会话正文，找不到退化为视口），
+  右边界再收窄到「贴窗口右缘的可见侧栏」左缘（原生 `[data-sidebar-right-panel][data-sidebar-right-open]`、
+  浮层式侧栏宿主 `[data-dsh-panel-host]` 的子面板）。右侧拉出/拖动侧栏时卡片跟着变窄并左移，
+  不会被侧栏挡住，也不会把侧栏压暗；`resize`、会话区 `ResizeObserver` 与指针拖动都会重新对齐。
 - 样式只用 `--dsw-alias-*` 主题令牌，明暗主题自动跟随。
 
 **关闭方式**

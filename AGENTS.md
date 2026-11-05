@@ -100,7 +100,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    - 发送：`finish` 读滚动区 → 命名会话 → best-effort 追加命令生命周期事件（见下条）→ `agent.followup`（附说明头 + cwd + transcript）→ 删除会话状态。发送成功后 Client 关闭面板（`setTerminalOpen(false)`）。
    - 卡片记录：`finish` 会 best-effort 追加一对 **log-only** 的 `command/run` + `command/done`（`agent.session.append`，`commandId = 'cmd-terminal-' + crypto.randomUUID()`，`command/run.data = { commandId, name:'cmd', args:<第一条命令>, source:{kind:'user'} }`，`command/done.data = { commandId, kind:'success', text:<已 clip 的 transcript> }`），形状与 commands 服务 `execute()` 完全一致；Chat 的 command Definition 把它折叠成 `CommandNode`，对话里因此保留一条终端卡片。它与「模型输入只走 followup」不冲突：事件是 UI/log 记录，不进模型上下文、不构成 surface 事件。任何一步 append 失败只吞掉（不阻断 followup、不把 finish 变成错误）；`run` 失败则不补 `done`（避免孤儿）；`followup` 抛错时补 `kind:'error'` 的 `done`（与 commands 服务的 settleThrown 同语义），错误原样抛出。**`close`（Esc / 点遮罩）绝不追加**。
    - 焦点：命令执行期间输入行用 `readOnly`（不要 `disabled`，否则焦点被浏览器移走），执行结束后 effect 把焦点还给输入行。
-   - 布局：交互终端注册在 `conversation.input.overlay`（session 作用域），渲染全屏遮罩 + 居中卡片模态（`position:fixed; inset:0; z-index:200`、`backdrop-filter:blur(3px)`；点遮罩关闭，卡片内点击 `stopPropagation`）；`/cmd` 模式提示条 `ShellCmdHint` 仍注册在 `conversation.composer.dock`。
+   - 布局：交互终端注册在 `conversation.input.overlay`（session 作用域），渲染遮罩 + 居中卡片模态（`z-index:200`、`backdrop-filter:blur(3px)`；点遮罩关闭，卡片内点击 `stopPropagation`）。遮罩**按会话区域定位**：CSS 兜底 `position:fixed;inset:0`，运行时用 `resolveSessionFrame` 取最近的 `[data-conversation-content]` 矩形（找不到退化为视口），再把右边界收窄到「贴窗口右缘的可见侧栏」左缘（原生 `[data-sidebar-right-panel][data-sidebar-right-open]`、浮层式侧栏宿主 `[data-dsh-panel-host]` 的子面板），由 `measureFrameOrigin` 换算 `fixed` 包含块原点后改写 left/top/width/height；`resize` + 会话区 `ResizeObserver` + `pointermove` 触发重排。目的：右侧拉出侧栏时不遮挡卡片、不压暗侧栏。`/cmd` 模式提示条 `ShellCmdHint` 仍注册在 `conversation.composer.dock`。
    - 轮询：**不在 claim 阶段自动打开**（否则 Esc 关闭后草稿仍是 `/cmd`，会被 claim 副作用立刻重开）；打开只由 commandUi action（主）/ OPEN_MARKER（兜底）触发。`status` 轮询仅在模态关闭时跑：`submitting` / `claimed` 相位进入后 8s 内按 180ms 快速轮询，其余时间 1.2s 低频兜底，且只读 `pendingOpen`。
    - 记录：任何带 OPEN_MARKER 的空参数 cmd 结果都**不渲染卡片**（否则 Esc 关闭后会留下一条莫名卡片）。裸 `/cmd` 的主触发是 client 侧 commandUi action；OPEN_MARKER（commandview）与 status 轮询只是兜底。
    - 语义边界：只有 `finish`（Ctrl+Enter）调用 `agent.followup`；`close`（Esc / 点遮罩）只 abort 运行中命令并删除终端状态，**绝不 followup**（Esc 路径：best-effort `close` RPC → 收起模态 → 若草稿仍是 `/cmd` 用 `inputActions.setDraft('')` 清残留）。`command/run` / `command/done` 是 log-only，不经模型。修改这两条路径时必须保持该不变量，并有测试覆盖。
@@ -117,7 +117,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 167 例全绿；新增用例后以 `npm test` 实际统计为准）。
+- 提交前：`npm run check && npm test`（当前 168 例全绿；新增用例后以 `npm test` 实际统计为准）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`Request`/`Response`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` 下 root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`；root=`conversation.input.overlay` 应出现 occupant id=`shell-cmd-terminal`；root=`conversation.composer.dock` 应出现 id=`shell-cmd-hint`。

@@ -388,6 +388,131 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ---- 模态定位：把遮罩限制在「会话区域」内 --------------------------------
+    //
+    // 宿主把 `conversation.input.overlay` 渲染在会话输入框里。模态若用
+    // `position: fixed; inset: 0` 会铺满整个窗口：一旦右侧拉出侧栏（原生右栏
+    // `sidebar.right`，或 better-sidebar 这类悬浮在会话区之上的侧栏），卡片右侧
+    // 就会被压在侧栏下面。改成按会话区域定位后：
+    // - 基准 = 最近的 `[data-conversation-content]` 祖先（宿主会话正文，右侧栏
+    //   参与布局挤压时会跟着变窄）；找不到时退化为整个视口；
+    // - 右边界再收窄到「贴右缘且可见」的侧栏浮层左缘，覆盖侧栏悬浮在会话区
+    //   之上、不参与布局挤压的情况；
+    // - `position: fixed` 的包含块未必是视口（宿主祖先可能带 transform / contain），
+    //   所以先量一次自身矩形作为坐标原点，再按「目标矩形 - 原点」换算。
+
+    /** 会话正文（聊天区）锚点；宿主 ui-conversation 的稳定 DOM 标记。 */
+    const SESSION_ANCHOR_SELECTOR = '[data-conversation-content]'
+    /** 原生右侧栏展开态的容器。 */
+    const RIGHT_PANEL_SELECTOR = '[data-sidebar-right-panel][data-sidebar-right-open]'
+    /** 浮层式侧栏（如 better-sidebar）的宿主层。 */
+    const RIGHT_PANEL_HOST_SELECTOR = '[data-dsh-panel-host]'
+
+    /**
+     * 收集「贴在窗口右缘的可见侧栏」，用于收窄模态右边界。
+     * @param {HTMLElement} overlay 模态遮罩自身（跳过自身与祖先）
+     * @returns {Element[]}
+     */
+    function collectRightPanels(overlay) {
+      const panels = []
+      const push = (node) => {
+        if (node === null || typeof node !== 'object' || node.nodeType !== 1) return
+        if (node === overlay || node.contains(overlay) || overlay.contains(node)) return
+        panels.push(node)
+      }
+      for (const node of document.querySelectorAll(RIGHT_PANEL_SELECTOR)) push(node)
+      for (const host of document.querySelectorAll(RIGHT_PANEL_HOST_SELECTOR)) {
+        // 退化模式下面板本身就是宿主；正常模式下宿主是全屏定位层，面板是其子节点。
+        if (host.hasAttribute('data-dsh-panel-host-degraded')) {
+          push(host)
+          continue
+        }
+        for (const child of Array.from(host.children)) push(child)
+      }
+      return panels
+    }
+
+    /**
+     * 计算模态应占用的会话区域矩形（视口坐标）。
+     * @param {HTMLElement} overlay 模态遮罩自身
+     * @param {{ left: number, top: number, right: number, bottom: number }} viewport
+     *   `position: fixed` 实际包含块的视口矩形（默认 = 视口）
+     * @returns {{ left: number, top: number, right: number, bottom: number }}
+     */
+    function resolveSessionFrame(overlay, viewport) {
+      let frame = { ...viewport }
+      const anchor = typeof overlay.closest === 'function' ? overlay.closest(SESSION_ANCHOR_SELECTOR) : null
+      if (anchor !== null) {
+        const rect = anchor.getBoundingClientRect()
+        if (rect.width >= 240 && rect.height >= 200) {
+          frame = { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+        }
+      }
+      frame.left = Math.max(viewport.left, frame.left)
+      frame.top = Math.max(viewport.top, frame.top)
+      frame.right = Math.min(viewport.right, frame.right)
+      frame.bottom = Math.min(viewport.bottom, frame.bottom)
+      // 只认贴右缘、够大、与会话区竖向重叠的面板；避免误伤浮动小工具条。
+      const minPanelLeft = frame.left + (frame.right - frame.left) * 0.3
+      for (const panel of collectRightPanels(overlay)) {
+        const rect = panel.getBoundingClientRect()
+        if (rect.width < 120 || rect.height < 120) continue
+        if (rect.right < viewport.right - 8) continue
+        if (rect.bottom <= frame.top || rect.top >= frame.bottom) continue
+        if (rect.left < minPanelLeft) continue
+        if (rect.left < frame.right) frame.right = rect.left
+      }
+      return frame
+    }
+
+    /**
+     * 清空内联定位并量出 `position: fixed` 包含块原点（视口坐标 + 尺寸）。
+     * 默认就是视口；宿主祖先带 transform / contain 时会是那个祖先。
+     * @param {HTMLElement} overlay 模态遮罩自身
+     */
+    function measureFrameOrigin(overlay) {
+      overlay.style.left = ''
+      overlay.style.right = ''
+      overlay.style.top = ''
+      overlay.style.bottom = ''
+      overlay.style.width = ''
+      overlay.style.height = ''
+      const rect = overlay.getBoundingClientRect()
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+    }
+
+    /**
+     * 把遮罩对齐到会话区域（右侧拉出侧栏时卡片随之变窄 / 左移，不会被遮挡）。
+     * @param {HTMLElement} overlay 模态遮罩自身
+     * @param {{ left: number, top: number, width: number, height: number }} origin
+     *   `measureFrameOrigin` 的结果
+     */
+    function applySessionFrame(overlay, origin) {
+      const viewport = {
+        left: origin.left,
+        top: origin.top,
+        right: origin.left + origin.width,
+        bottom: origin.top + origin.height,
+      }
+      const frame = resolveSessionFrame(overlay, viewport)
+      overlay.style.left = `${frame.left - viewport.left}px`
+      overlay.style.top = `${frame.top - viewport.top}px`
+      overlay.style.right = 'auto'
+      overlay.style.bottom = 'auto'
+      overlay.style.width = `${Math.max(0, frame.right - frame.left)}px`
+      overlay.style.height = `${Math.max(0, frame.bottom - frame.top)}px`
+    }
+
+    /** 清掉模态上的内联定位（关闭 / 卸载时恢复 CSS 里的 inset:0 兜底）。 */
+    function clearSessionFrame(overlay) {
+      overlay.style.left = ''
+      overlay.style.right = ''
+      overlay.style.top = ''
+      overlay.style.bottom = ''
+      overlay.style.width = ''
+      overlay.style.height = ''
+    }
+
     /** 尾部状态标记行 → 结构化状态。标记由 Host 半端在文本末尾追加。 */
     const MARKER_RE =
       /^\[(?:exit code: (\d+)|timed out after (\d+)ms|aborted|killed by signal: ([^\]\n]+)|output truncated before display|some output was truncated by the executor)\]$/
@@ -1045,6 +1170,7 @@ window.__ModuleLoader__.load({
       const closeGuardRef = React.useRef(0)
       const draftRef = React.useRef(draft)
       draftRef.current = draft
+      const backdropRef = React.useRef(null)
 
       // 刚提交过 /cmd 时快速轮询（180ms），其余时间低频兜底（1.2s）。
       React.useEffect(() => {
@@ -1083,6 +1209,58 @@ window.__ModuleLoader__.load({
         return () => document.removeEventListener('keydown', onKeyDown, true)
       }, [open, close])
 
+      // 会话区域定位：右侧拉出侧栏时，遮罩/卡片只占会话区并随布局缩放（见上方
+      // resolveSessionFrame 注释）。只读会话正文矩形，不改宿主 DOM。
+      React.useLayoutEffect(() => {
+        if (!open) return undefined
+        const overlay = backdropRef.current
+        if (overlay === null) return undefined
+        let raf = 0
+        let disposed = false
+        let origin = null
+        const sync = () => {
+          if (disposed) return
+          if (origin === null) origin = measureFrameOrigin(overlay)
+          applySessionFrame(overlay, origin)
+        }
+        const schedule = () => {
+          if (disposed || raf !== 0) return
+          raf = window.requestAnimationFrame(() => {
+            raf = 0
+            sync()
+          })
+        }
+        // 窗口 / 会话区尺寸变化时重测包含块原点；拖动右侧栏只改会话区矩形，
+        // 由 pointermove 走轻量路径（不重测原点）。
+        const onResize = () => {
+          if (disposed) return
+          origin = null
+          schedule()
+        }
+        sync()
+        window.addEventListener('resize', onResize)
+        window.addEventListener('orientationchange', onResize)
+        // 浮层式侧栏拖动时不改会话正文宽度，靠指针移动兜底刷新。
+        document.addEventListener('pointermove', schedule, { passive: true })
+        let observer = null
+        if (typeof ResizeObserver === 'function') {
+          // 会话区尺寸变化时连原点一起重测（包含块偶发不是视口时也能纠正）。
+          observer = new ResizeObserver(onResize)
+          const anchor = overlay.closest(SESSION_ANCHOR_SELECTOR)
+          if (anchor !== null) observer.observe(anchor)
+          for (const panel of collectRightPanels(overlay)) observer.observe(panel)
+        }
+        return () => {
+          disposed = true
+          if (raf !== 0) window.cancelAnimationFrame(raf)
+          window.removeEventListener('resize', onResize)
+          window.removeEventListener('orientationchange', onResize)
+          document.removeEventListener('pointermove', schedule)
+          if (observer !== null) observer.disconnect()
+          clearSessionFrame(overlay)
+        }
+      }, [open, sessionId])
+
       // 轮询兜底：只在面板关闭时跑，取走 Host 记录的 pendingOpen（不消费请求）。
       React.useEffect(() => {
         if (open || sessionId.length === 0) return undefined
@@ -1115,6 +1293,7 @@ window.__ModuleLoader__.load({
         {
           className: 'dsc-term-backdrop',
           'data-shell-cmd-terminal': 'overlay',
+          ref: backdropRef,
           // 点遮罩关闭；卡片内点击 stopPropagation，不会误关。
           onMouseDown: (event) => {
             if (event.target === event.currentTarget) close()

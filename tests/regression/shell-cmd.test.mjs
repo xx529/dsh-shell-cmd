@@ -893,4 +893,22 @@ describe('Host 源码锁定（非行为验证）', () => {
     assert.match(executable, /ctx\.inject\(\['connection'\]/u)
     assert.match(executable, /path: TERMINAL_FETCH_PATH/u)
   })
+
+  it('R34 锁定模态按会话区域定位（右侧拉出侧栏不遮挡 / 不压暗侧栏）', () => {
+    // 源码锁定：会话区域锚点 + 右栏收窄 + fixed 包含块原点换算 + 运行时重排。
+    assert.match(CLIENT_SOURCE, /\[data-conversation-content\]/u)
+    assert.match(CLIENT_SOURCE, /\[data-sidebar-right-panel\]\[data-sidebar-right-open\]/u)
+    assert.match(CLIENT_SOURCE, /\[data-dsh-panel-host\]/u)
+    assert.match(CLIENT_SOURCE, /function collectRightPanels\(overlay\)/u)
+    assert.match(CLIENT_SOURCE, /function resolveSessionFrame\(overlay, viewport\)/u)
+    assert.match(CLIENT_SOURCE, /function measureFrameOrigin\(overlay\)/u)
+    assert.match(CLIENT_SOURCE, /function applySessionFrame\(overlay, origin\)/u)
+    assert.match(CLIENT_SOURCE, /function clearSessionFrame\(overlay\)/u)
+    assert.match(CLIENT_SOURCE, /ref: backdropRef/u)
+    assert.match(CLIENT_SOURCE, /window\.addEventListener\('resize', onResize\)/u)
+    assert.match(CLIENT_SOURCE, /new ResizeObserver\(onResize\)/u)
+    assert.match(CLIENT_SOURCE, /document\.addEventListener\('pointermove', schedule, \{ passive: true \}\)/u)
+    // CSS 兜底仍在：JS 未生效（找不到锚点）时不至于没有遮罩。
+    assert.match(CLIENT_SOURCE, /\.dsc-term-backdrop \{/u)
+  })
 })
