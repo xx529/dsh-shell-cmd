@@ -225,6 +225,11 @@ plugin_manager action=install_bundle target=/Users/lzx/Documents/GitHub/dsh-shel
 
 Host 行 / Client 半端分别是 `index.js` 与 `client.js`，由 `package.json` 的 `dsh.bundle.patch` 与 `dsh.client` 声明。
 
+### 兼容性
+
+- 支持 DSH `>=0.2.1-rc.2 <0.3.0`，并正式声明 **0.2.2-rc.1**（`engines.dsh` 同时覆盖 0.2.1 与 0.2.2 两条预发布线；DSH 0.2.2 要求 Node.js ≥ 24.9）。
+- dsh 0.2.2 起输入框（docked composer）带 `will-change: transform`，成为 `position: fixed` 后代的包含块。交互终端模态因此用 `createPortal` 渲染到 `document.body`（插槽里只保留隐藏锚点做会话区域定位）；在 0.2.1 及更早版本上行为不变。
+
 ### 从 Git 仓库安装 / 发布（可复用）
 
 开发时用上面的本地链接安装；需要“推送仓库、并从 GitHub 仓库重装到当前 profile”时用脚本：
@@ -340,6 +345,7 @@ npm run verify  # check + test
 | 打开后立即报「会话尚未就绪」 | Host 侧 `session-not-found`：会话还没就绪或已被关闭，稍后点「重试」；Host 侧 `/api/cmd-terminal/rpc` 路由需由 `connection.fetch` 注册成功（404 时检查插件是否 active / 是否需重载 Host） |
 | 终端里命令跑但看不到输出 | 看模态内错误行是否显示 `busy` / `session-not-found`；确认命令是**按行执行**的（全屏 TUI 不支持），长命令执行期间状态为「执行中…」 |
 | 发送给模型后卡片/面板重复出现 | 只有 Ctrl+Enter 会 `finish`；Esc/关闭只清 Host 终端状态，不产生模型消息。若旧版本残留卡片，刷新页面即可 |
+| 交互终端模态只盖住输入框 / 位置错位 | dsh 0.2.2 起输入框成为 fixed 包含块，模态必须 portal 到 `document.body`。确认插件为 0.3.14+ 且已刷新页面（client.js 变更需刷新，无 HMR） |
 
 ## 已知边界
 

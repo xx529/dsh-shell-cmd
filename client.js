@@ -3,7 +3,8 @@
  *
  * 形态约束：
  * - 本文件是宿主 `window.__ModuleLoader__` 的懒工厂注册脚本，id 必须等于包名。
- * - 不能 import / require 任何相对文件或其它 Client 包；只能 `require('react')`。
+ * - 不能 import / require 任何相对文件或其它 Client 包；只能 `require('react')`
+ *   与 portal 所需的 `require('react-dom')`（缺失时退回渲染在插槽内）。
  * - 无 JSX：全部 `React.createElement`。
  * - 样式通过 `<style data-plugin-css>` 注入，并在 `ctx.effect` 清理函数里移除。
  *
@@ -23,6 +24,15 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
+    // dsh 0.2.2 起 docked composer 带 `will-change: transform`，成为 fixed 后代的
+    // 包含块；宿主契约要求 `conversation.input.*` 里的 fixed 浮层 portal 到
+    // document.body。缺失 react-dom 种子模块时退回旧的「渲染在插槽里」路径。
+    let ReactDOM = null
+    try {
+      ReactDOM = require('react-dom')
+    } catch {
+      ReactDOM = null
+    }
 
     const NS = 'dsh-shell-cmd'
 
@@ -394,12 +404,18 @@ window.__ModuleLoader__.load({
     // `position: fixed; inset: 0` 会铺满整个窗口：一旦右侧拉出侧栏（原生右栏
     // `sidebar.right`，或 better-sidebar 这类悬浮在会话区之上的侧栏），卡片右侧
     // 就会被压在侧栏下面。改成按会话区域定位后：
-    // - 基准 = 最近的 `[data-conversation-content]` 祖先（宿主会话正文，右侧栏
-    //   参与布局挤压时会跟着变窄）；找不到时退化为整个视口；
+    // - 基准 = 插槽锚点最近的 `[data-conversation-content]` 祖先（宿主会话正文，
+    //   右侧栏参与布局挤压时会跟着变窄）；找不到时退化为整个视口；
     // - 右边界再收窄到「贴右缘且可见」的侧栏浮层左缘，覆盖侧栏悬浮在会话区
     //   之上、不参与布局挤压的情况；
     // - `position: fixed` 的包含块未必是视口（宿主祖先可能带 transform / contain），
     //   所以先量一次自身矩形作为坐标原点，再按「目标矩形 - 原点」换算。
+    //
+    // dsh 0.2.2 起 docked composer（`composerSeat`）带 `will-change: transform`，
+    // 成为 fixed 后代的包含块；若仍渲染在插槽里，`inset:0` 只覆盖输入框，
+    // 会话区矩形也会被夹到输入框范围内。因此遮罩必须 portal 到 document.body，
+    // 插槽里只保留一个隐藏锚点用于定位会话正文（宿主 README 的
+    // 「fixed 浮层 portal 到 document body」契约）。
 
     /** 会话正文（聊天区）锚点；宿主 ui-conversation 的稳定 DOM 标记。 */
     const SESSION_ANCHOR_SELECTOR = '[data-conversation-content]'
@@ -434,15 +450,15 @@ window.__ModuleLoader__.load({
 
     /**
      * 计算模态应占用的会话区域矩形（视口坐标）。
-     * @param {HTMLElement} overlay 模态遮罩自身
+     * @param {HTMLElement} overlay 模态遮罩自身（仅用于排除右侧栏面板）
+     * @param {Element | null} anchor 会话正文锚点（`[data-conversation-content]`）
      * @param {{ left: number, top: number, right: number, bottom: number }} viewport
      *   `position: fixed` 实际包含块的视口矩形（默认 = 视口）
      * @returns {{ left: number, top: number, right: number, bottom: number }}
      */
-    function resolveSessionFrame(overlay, viewport) {
+    function resolveSessionFrame(overlay, anchor, viewport) {
       let frame = { ...viewport }
-      const anchor = typeof overlay.closest === 'function' ? overlay.closest(SESSION_ANCHOR_SELECTOR) : null
-      if (anchor !== null) {
+      if (anchor !== null && anchor !== undefined && typeof anchor.getBoundingClientRect === 'function') {
         const rect = anchor.getBoundingClientRect()
         if (rect.width >= 240 && rect.height >= 200) {
           frame = { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
@@ -486,15 +502,16 @@ window.__ModuleLoader__.load({
      * @param {HTMLElement} overlay 模态遮罩自身
      * @param {{ left: number, top: number, width: number, height: number }} origin
      *   `measureFrameOrigin` 的结果
+     * @param {Element | null} anchor 会话正文锚点
      */
-    function applySessionFrame(overlay, origin) {
+    function applySessionFrame(overlay, origin, anchor) {
       const viewport = {
         left: origin.left,
         top: origin.top,
         right: origin.left + origin.width,
         bottom: origin.top + origin.height,
       }
-      const frame = resolveSessionFrame(overlay, viewport)
+      const frame = resolveSessionFrame(overlay, anchor, viewport)
       overlay.style.left = `${frame.left - viewport.left}px`
       overlay.style.top = `${frame.top - viewport.top}px`
       overlay.style.right = 'auto'
@@ -1170,6 +1187,8 @@ window.__ModuleLoader__.load({
       const closeGuardRef = React.useRef(0)
       const draftRef = React.useRef(draft)
       draftRef.current = draft
+      // 插槽里的隐藏锚点：portal 后遮罩不在插槽 DOM 内，靠它找到会话正文矩形。
+      const anchorHostRef = React.useRef(null)
       const backdropRef = React.useRef(null)
 
       // 刚提交过 /cmd 时快速轮询（180ms），其余时间低频兜底（1.2s）。
@@ -1215,13 +1234,17 @@ window.__ModuleLoader__.load({
         if (!open) return undefined
         const overlay = backdropRef.current
         if (overlay === null) return undefined
+        // 遮罩已 portal 到 body，插槽内的隐藏锚点仍能定位当前会话正文。
+        const host = anchorHostRef.current
+        const anchor =
+          host !== null && typeof host.closest === 'function' ? host.closest(SESSION_ANCHOR_SELECTOR) : null
         let raf = 0
         let disposed = false
         let origin = null
         const sync = () => {
           if (disposed) return
           if (origin === null) origin = measureFrameOrigin(overlay)
-          applySessionFrame(overlay, origin)
+          applySessionFrame(overlay, origin, anchor)
         }
         const schedule = () => {
           if (disposed || raf !== 0) return
@@ -1246,7 +1269,6 @@ window.__ModuleLoader__.load({
         if (typeof ResizeObserver === 'function') {
           // 会话区尺寸变化时连原点一起重测（包含块偶发不是视口时也能纠正）。
           observer = new ResizeObserver(onResize)
-          const anchor = overlay.closest(SESSION_ANCHOR_SELECTOR)
           if (anchor !== null) observer.observe(anchor)
           for (const panel of collectRightPanels(overlay)) observer.observe(panel)
         }
@@ -1288,7 +1310,7 @@ window.__ModuleLoader__.load({
 
       if (!open || sessionId.length === 0) return null
       const tr = makeTranslator(props.t)
-      return h(
+      const modal = h(
         'div',
         {
           className: 'dsc-term-backdrop',
@@ -1310,6 +1332,21 @@ window.__ModuleLoader__.load({
           },
           h(TerminalView, { sessionId, tr, onClose: close }),
         ),
+      )
+      // portal 到 document.body（见上方定位注释）；插槽里只留隐藏锚点。
+      // react-dom 不可用时退回旧路径：遮罩仍渲染在插槽内。
+      return h(
+        React.Fragment,
+        null,
+        h('span', {
+          key: 'anchor',
+          ref: anchorHostRef,
+          hidden: true,
+          'aria-hidden': 'true',
+        }),
+        ReactDOM !== null && typeof ReactDOM.createPortal === 'function'
+          ? ReactDOM.createPortal(modal, document.body)
+          : modal,
       )
     }
 

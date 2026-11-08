@@ -6,14 +6,16 @@
  * 约束（与 task-5 一致）：
  * - 只新增本文件，不改既有测试（tests/terminal.test.mjs / tests/command.test.mjs）与任何产品代码；
  * - 不 spawn 真进程、不联网：所有 Host 依赖用伪 ctx / 伪 registry / WHATWG Request/Response；
- * - client.js 是浏览器半端脚本（依赖 window.__ModuleLoader__），无法在 node:test 里导入，
- *   因此改用「源码锁定」断言。**源码锁定只证明源码里存在/不存在某段文本，不是行为验证**，
+ * - client.js 是浏览器半端脚本（依赖 window.__ModuleLoader__），无法直接 import；
+ *   装配契约用 vm 伪 window/import 加载工厂验证（R46），UI 行为仍用「源码锁定」断言。
+ *   **源码锁定只证明源码里存在/不存在某段文本，不是行为验证**，
  *   真正的浏览器行为只能由人工复验（见 docs/testing/verification.md 第 7 节）。
  */
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import vm from 'node:vm'
 
 import {
   OPEN_MARKER,
@@ -859,8 +861,8 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /readOnly: busy \|\| sent/u)
   })
 
-  it('R31 package.json：版本 0.3.13 且声明 commandUi 客户端依赖', () => {
-    assert.equal(PACKAGE_JSON.version, '0.3.13')
+  it('R31 package.json：版本 0.3.14 且声明 commandUi 客户端依赖', () => {
+    assert.equal(PACKAGE_JSON.version, '0.3.14')
     const inject = PACKAGE_JSON?.dsh?.client?.inject
     assert.equal(Array.isArray(inject), true)
     assert.ok(inject.includes('@deepseek-ai/dsh-client-ui-commands'), '必须声明 @deepseek-ai/dsh-client-ui-commands')
@@ -900,9 +902,9 @@ describe('Host 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /\[data-sidebar-right-panel\]\[data-sidebar-right-open\]/u)
     assert.match(CLIENT_SOURCE, /\[data-dsh-panel-host\]/u)
     assert.match(CLIENT_SOURCE, /function collectRightPanels\(overlay\)/u)
-    assert.match(CLIENT_SOURCE, /function resolveSessionFrame\(overlay, viewport\)/u)
+    assert.match(CLIENT_SOURCE, /function resolveSessionFrame\(overlay, anchor, viewport\)/u)
     assert.match(CLIENT_SOURCE, /function measureFrameOrigin\(overlay\)/u)
-    assert.match(CLIENT_SOURCE, /function applySessionFrame\(overlay, origin\)/u)
+    assert.match(CLIENT_SOURCE, /function applySessionFrame\(overlay, origin, anchor\)/u)
     assert.match(CLIENT_SOURCE, /function clearSessionFrame\(overlay\)/u)
     assert.match(CLIENT_SOURCE, /ref: backdropRef/u)
     assert.match(CLIENT_SOURCE, /window\.addEventListener\('resize', onResize\)/u)
@@ -910,5 +912,159 @@ describe('Host 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /document\.addEventListener\('pointermove', schedule, \{ passive: true \}\)/u)
     // CSS 兜底仍在：JS 未生效（找不到锚点）时不至于没有遮罩。
     assert.match(CLIENT_SOURCE, /\.dsc-term-backdrop \{/u)
+  })
+
+  it('R45 dsh 0.2.2：composer 成为 fixed 包含块，模态必须 portal 到 document.body', () => {
+    // 0.2.2-rc.1 起 docked composer 带 will-change: transform（宿主 README 的
+    // fixed-overlay 契约）；模态渲染在插槽里会被夹到输入框范围内。
+    assert.match(CLIENT_SOURCE, /require\('react-dom'\)/u)
+    assert.match(CLIENT_SOURCE, /ReactDOM\.createPortal\(modal, document\.body\)/u)
+    // 插槽里保留隐藏锚点，portal 后仍能定位会话正文。
+    assert.match(CLIENT_SOURCE, /ref: anchorHostRef/u)
+    assert.match(CLIENT_SOURCE, /host\.closest\(SESSION_ANCHOR_SELECTOR\)/u)
+    // 引擎范围必须正式声明 0.2.2 预发布线（plain semver 不自动包含 rc）。
+    assert.match(PACKAGE_JSON.engines.dsh, />=0\.2\.2-rc\.1/u)
+  })
+})
+
+
+describe('Client bundle 装配（vm 加载，不做真实渲染）', () => {
+  const makeReact = () => {
+    const noop = () => {}
+    return {
+      createElement: (type, props, ...children) => ({ type, props, children }),
+      Fragment: Symbol.for('react.fragment'),
+      useRef: (current) => ({ current }),
+      useState: (init) => [typeof init === 'function' ? init() : init, noop],
+      useEffect: noop,
+      useLayoutEffect: noop,
+      useCallback: (fn) => fn,
+      useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
+    }
+  }
+
+  /**
+   * 用伪 window 载入 client.js，取回 `__ModuleLoader__` 注册与工厂导出。
+   * @param {{ reactDom?: 'stub' | 'missing' }} options react-dom 种子模块可用性
+   * @returns {{ registration: any, exports: any }}
+   */
+  function loadBundle(options = {}) {
+    let registration = null
+    const window = {
+      __ModuleLoader__: {
+        load: (value) => {
+          registration = value
+        },
+      },
+    }
+    const require = (spec) => {
+      if (spec === 'react') return makeReact()
+      if (spec === 'react-dom') {
+        if (options.reactDom === 'missing') throw new Error('react-dom seed module is unavailable')
+        return { createPortal: (node, target) => ({ portal: true, node, target }) }
+      }
+      throw new Error(`unexpected require: ${spec}`)
+    }
+    // effect 会执行 insertStyle（document 只在 effect 回调里用），给最小 DOM 桩。
+    const document = {
+      body: { tagName: 'BODY' },
+      createElement: () => ({ setAttribute() {}, remove() {} }),
+      head: { appendChild() {} },
+    }
+    vm.runInNewContext(CLIENT_SOURCE, { window, document }, { filename: 'client.js' })
+    assert.notEqual(registration, null, 'client.js 必须向 __ModuleLoader__ 注册工厂')
+    return { registration, exports: registration.factory(require), document }
+  }
+
+  /** 伪 ctx：记录注册；effect 同步执行工厂回调（与 Cordis 一致），返回清理函数。 */
+  function makeCtx() {
+    const slotSpecs = []
+    const slotEntries = []
+    const slotInjects = []
+    const decorations = []
+    const effects = []
+    const effect = (fn, label) => {
+      effects.push(label)
+      const disposer = fn()
+      return typeof disposer === 'function' ? disposer : () => {}
+    }
+    const ctx = {
+      effect,
+      locale: {
+        register: () => () => {},
+        bind: () => (key) => key,
+      },
+      slots: {
+        inject: (name, register) => {
+          slotInjects.push(name)
+          register()
+        },
+        register: (spec, component) => {
+          slotSpecs.push(spec)
+          slotEntries.push({ spec, component })
+          return () => {}
+        },
+      },
+      inject: (deps, callback) => {
+        callback({
+          effect,
+          commandUi: {
+            decorate: (spec) => {
+              decorations.push(spec)
+              return () => {}
+            },
+          },
+        })
+      },
+    }
+    return { ctx, slotSpecs, slotEntries, slotInjects, decorations, effects }
+  }
+
+  it('R46 工厂导出与三槽装配在 react-dom 可用/缺失时都成立（0.2.2 降级路径）', () => {
+    for (const reactDom of ['stub', 'missing']) {
+      const { registration, exports } = loadBundle({ reactDom })
+      assert.equal(registration.id, 'dsh-shell-cmd')
+      assert.equal(registration.chunk, undefined)
+      assert.deepEqual([...exports.inject], ['slots', 'locale'])
+      assert.equal(typeof exports.apply, 'function')
+
+      const state = makeCtx()
+      exports.apply(state.ctx)
+      const specs = state.slotSpecs.map((spec) => `${spec.name}:${spec.key ?? spec.id}`)
+      assert.ok(specs.includes('conversation.chat.commandview:cmd'))
+      assert.ok(specs.includes('conversation.composer.dock:shell-cmd-hint'))
+      assert.ok(specs.includes('conversation.input.overlay:shell-cmd-terminal'))
+      assert.ok(state.slotInjects.includes('conversation.input.overlay'))
+      assert.ok(state.decorations.some((spec) => spec.name === 'cmd' && spec.ui?.kind === 'action'))
+      assert.ok(state.effects.includes('dsh-shell-cmd: card styles'))
+    }
+  })
+
+  it('R47 打开后的模态渲染为 document.body portal，插槽内只留隐藏锚点', () => {
+    const { exports, document } = loadBundle()
+    const state = makeCtx()
+    exports.apply(state.ctx)
+    const entry = state.slotEntries.find((item) => item.spec.name === 'conversation.input.overlay')
+    assert.equal(entry.spec.id, 'shell-cmd-terminal')
+    // 装饰 action 打开该 Session 的终端（与真实 commandUi 裸调用路径一致）。
+    const action = state.decorations.find((spec) => spec.name === 'cmd')
+    action.ui.run({ sessionId: 's1' })
+
+    // 直接执行 TerminalEntry / TerminalOverlay（React 钩子用桩，useLayoutEffect 不跑几何）。
+    const entryElement = entry.component({
+      sessionId: 's1',
+      useInput: (selector) => selector({ phase: 'plain', draft: '/cmd' }),
+      inputActions: {},
+      t: (key) => key,
+    })
+    const rendered = entryElement.type(entryElement.props)
+    assert.equal(rendered.type, Symbol.for('react.fragment'))
+    const [anchor, portal] = rendered.children
+    assert.equal(anchor.type, 'span')
+    assert.equal(anchor.props.hidden, true)
+    assert.notEqual(anchor.props.ref, undefined, '插槽内必须保留隐藏锚点（用于会话区域定位）')
+    assert.equal(portal.portal, true)
+    assert.equal(portal.target, document.body)
+    assert.equal(portal.node.props.className, 'dsc-term-backdrop')
   })
 })

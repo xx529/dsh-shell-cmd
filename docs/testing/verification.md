@@ -3,7 +3,7 @@
 - 文档：`docs/testing/verification.md`
 - 作者：tester（独立验收角色；只写 `docs/testing/**` 与 `tests/regression/**`，不改产品代码与既有测试）
 - 创建：2026-10-28（task-4 准备阶段）
-- 状态：**checklist 已定稿；0.3.12 三修复验收 PASS（第 9 节）；0.3.13 追加验收「发送后保留命令行卡片」PASS（第 10 节，含 10.7 GitHub 重装后运行时核查；视觉/交互仍待人工）**
+- 状态：**checklist 已定稿；0.3.12 三修复验收 PASS（第 9 节）；0.3.13 追加验收「发送后保留命令行卡片」PASS（第 10 节，含 10.7 GitHub 重装后运行时核查）；0.3.14 适配 dsh 0.2.2-rc.1（第 11 节）**
 - 验收对象：`dsh-shell-cmd` 仓库（dsh 插件），三处修复 ①相对 `/api` 传输 ②`/cmd` 居中模态 ③关闭后不再自动重开
 - 实现归属：frontend（task-2：`client.js` / `package.json` / `README.md`）、backend（task-3：`index.js` / `terminal.js` / 既有测试）
 
@@ -552,3 +552,46 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 **运行时核查结论**：Host 侧 **PASS**（fiber active + 安装产物一致）；client 三槽 **PASS（Lead 代跑，R5 原文）**——tester 侧 client inspector 通道超时的问题已由 Lead 交叉复核，`shell-cmd-terminal` / `shell-cmd-hint` / `commandview key=cmd` 均 active。0.3.13 是 **Host-only 变更**（`client.js` 零改动，已由提交 stat 证明），与 client 注册状态无冲突。
 
 **最终裁定（task-8 / 0.3.13）**：**PASS（含未覆盖项）** —— 事件契约/顺序/配对/失败容忍/close 不追加/模型语义不变均有单元测试（backend2 8 例）+ 独立回归（tester 9 例）+ dsh 宿主源码核对证据；全量 167/167 全绿；GitHub 重装后 Host fiber active、安装产物一致、client 三槽 active。未覆盖（需人工）：真实 UI 卡片渲染/位置/顺序/展开/复制、刷新或重开会话后的持久化回放、Esc 不产卡与 Ctrl+Enter 的差异、模型真实收到 transcript 并回复（见 10.4、10.5）。若人工复验发现卡片缺失/重复/停在执行中，应回退为 FAIL。
+
+---
+
+## 11. 适配 dsh 0.2.2-rc.1（0.3.14，2026-11-08）
+
+### 11.1 背景与核对方法
+
+桌面端 DSH 已升级到 **0.2.2-rc.1**（`/Applications/DeepSeek Harness.app` `Info.plist` 与 `app.asar/dsh/package.json` 均为 0.2.2-rc.1）。核对方式：
+
+1. 从 `app.asar` 读出 0.2.2-rc.1 的宿主包与客户端包（含 README.zh.md 契约文档）；
+2. 从 npm 下载 0.2.1-rc.2 的同名包，对插件实际使用的 API/契约做 diff；
+3. 对照 GitHub 发布说明 `dsh-v0.2.2-rc.1` 与 `docs/upgrade-guide/**`。
+
+### 11.2 契约核对结论
+
+| 契约 | 0.2.1-rc.2 → 0.2.2-rc.1 | 是否受影响 | 处理 |
+| --- | --- | --- | --- |
+| `engines.dsh` 兼容性判定 | 只读 `engines.dsh`（或 peer），校验时 `includePrerelease: true`；但 plain semver 下旧范围 `>=0.2.1-rc.2 <0.3.0` **不含** 0.2.2-rc.1 | 是（声明层面） | 改为 `>=0.2.1-rc.2 <0.3.0 \|\| >=0.2.2-rc.1 <0.3.0` |
+| `conversation.input.overlay` 固定浮层 | docked composer 的 `composerSeat` 新增 `will-change: transform`，成为 `position: fixed` 后代的包含块；宿主 README 明确要求 `conversation.input.*` 的 fixed 浮层 **portal 到 document.body** | 是（真实回归：模态会被夹到输入框范围） | 遮罩改为 `ReactDOM.createPortal(modal, document.body)`；插槽内保留隐藏锚点 `anchorHostRef` 定位会话正文 |
+| `ctx.commands.register` / `command/run`+`command/done` | `lib/index.js` 与类型定义无变化 | 否 | 不变 |
+| `agent.followup` / `agent.session.append` / `agent.inbox` | 类型无变化 | 否 | 不变 |
+| `ctx.sessionTitle.rename` / `get` | 仅删除旧投影 map，签名不变 | 否 | 不变 |
+| `ctx.shell.resolve/execute`、`ctx.workingDirectory.ensure` | bash-sandbox 无代码变化；working-directory 仅内部投影 handle 改动 | 否 | 不变 |
+| `connection.fetch.register` | host 实现与 `requestBody: 'buffered'` 不变 | 否 | 不变 |
+| `ctx.commandUi.decorate`、三处 slot props、`CommandNode` | 契约类型无变化 | 否 | 不变 |
+| `ctx.locale.register` | 新增 6 种语言但均为可选，`en`/`zh` 仍为基线 | 否 | 不变（新语言回退英文） |
+| Node.js ≥ 24.9 | 宿主运行时要求（0.2.2 起不再支持 Node 22） | 否（宿主内置 Node 24.21） | 插件 `engines.node` 不变（与 dsh-context 同为 `^22.19.0 \|\| >=24.0.0`） |
+
+### 11.3 变更清单
+
+| 文件 | 变更 |
+| --- | --- |
+| `client.js` | 模态 portal 到 `document.body`；`resolveSessionFrame(overlay, anchor, viewport)` / `applySessionFrame(overlay, origin, anchor)` 改用插槽隐藏锚点定位；`require('react-dom')` 缺失时退回旧渲染路径 |
+| `package.json` | `version` 0.3.13 → **0.3.14**；`engines.dsh` 追加 `>=0.2.2-rc.1` 线 |
+| `README.md` | 新增「兼容性」小节与模态定位排错行 |
+| `AGENTS.md` | 记录 fixed-overlay portal 契约与排错指引 |
+| `tests/regression/shell-cmd.test.mjs` | R31 版本同步；R34 更新函数签名断言；新增 R45（portal 源码契约 + engines 声明）、R46（vm 加载工厂/三槽装配，react-dom 可用与缺失两条路径）、R47（打开后的模态渲染为 body portal + 隐藏锚点） |
+
+### 11.4 验证
+
+- `npm run check && npm test`：**171/171 全绿**（含新增 R45–R47）。
+- 静态证据：DSH 0.2.2-rc.1 的 `dsh-client-ui-conversation/lib/client.js` 中 `composerSeat` 的 `will-change:transform`，以及其 README「fixed 浮层必须 portal 到 document body」的契约原文。
+- **未覆盖（需人工）**：刷新页面后在真实桌面端打开裸 `/cmd` —— 期望遮罩覆盖整个会话区、卡片居中、右侧栏展开时不遮挡/不压暗；Esc/点遮罩关闭与 Ctrl+Enter 发送路径保持原样（无新增卡片、无重复发送）。R45 只锁定源码结构；R46/R47 用 vm + React 桩验证装配与 portal 目标，但真实布局（几何重排、z-index、主题变量继承）仍需浏览器人工复验。
