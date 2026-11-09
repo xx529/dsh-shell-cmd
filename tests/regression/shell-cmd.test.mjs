@@ -23,7 +23,16 @@ import {
   createTerminalRegistry,
   createTerminalFetchRoute,
 } from '../../terminal.js'
-import { USAGE, apply, executeShellCommand, isTerminalModeAvailable } from '../../index.js'
+import {
+  USAGE,
+  USER_CARD_META,
+  USER_MESSAGE_MARKER,
+  apply,
+  composeModelText,
+  createShellCommandCardMessage,
+  executeShellCommand,
+  isTerminalModeAvailable,
+} from '../../index.js'
 
 const CLIENT_SOURCE = readFileSync(new URL('../../client.js', import.meta.url), 'utf8')
 const TERMINAL_SOURCE = readFileSync(new URL('../../terminal.js', import.meta.url), 'utf8')
@@ -861,8 +870,8 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /readOnly: busy \|\| sent/u)
   })
 
-  it('R31 package.json：版本 0.3.14 且声明 commandUi 客户端依赖', () => {
-    assert.equal(PACKAGE_JSON.version, '0.3.14')
+  it('R31 package.json：版本 0.3.16 且声明 commandUi 客户端依赖', () => {
+    assert.equal(PACKAGE_JSON.version, '0.3.16')
     const inject = PACKAGE_JSON?.dsh?.client?.inject
     assert.equal(Array.isArray(inject), true)
     assert.ok(inject.includes('@deepseek-ai/dsh-client-ui-commands'), '必须声明 @deepseek-ai/dsh-client-ui-commands')
@@ -871,6 +880,33 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.ok(PACKAGE_JSON.files.includes('client.js'))
     assert.ok(PACKAGE_JSON.files.includes('terminal.js'))
   })
+
+  it('R48 卡片输出常驻滚动 + 「展开全部」打开大卡片模态（模糊背景 / 可滚动 / Esc）', () => {
+    // 1) 卡片状态下就可滚动：不再把长输出切成前 10 行，而是完整渲染进有界滚动区。
+    assert.doesNotMatch(CLIENT_SOURCE, /lines\.slice\(0, 10\)/u)
+    assert.doesNotMatch(CLIENT_SOURCE, /setExpanded/u)
+    assert.match(CLIENT_SOURCE, /\.dsc-body \{[\s\S]*?max-height: 320px;[\s\S]*?overflow: auto;/u)
+    assert.match(CLIENT_SOURCE, /\.dsc-body \{[\s\S]*?overscroll-behavior: contain;/u)
+
+    // 2) 「展开全部」是弹出大卡片，而不是行内显隐切换。
+    assert.match(CLIENT_SOURCE, /function OutputModal\(props\)/u)
+    assert.match(CLIENT_SOURCE, /className: 'dsc-expand-backdrop'/u)
+    assert.match(CLIENT_SOURCE, /className: 'dsc-expand-card'/u)
+    assert.match(CLIENT_SOURCE, /role: 'dialog'/u)
+    assert.match(CLIENT_SOURCE, /'aria-modal': 'true'/u)
+    assert.match(CLIENT_SOURCE, /'aria-haspopup': 'dialog'/u)
+    // 3) 大卡片：更宽更高、输出区可滚动、背景模糊（主题令牌 + 字面遮罩兜底）。
+    assert.match(CLIENT_SOURCE, /\.dsc-expand-card \{[\s\S]*?width: min\(940px, 100%\);[\s\S]*?max-height: min\(86vh, 860px\);/u)
+    assert.match(CLIENT_SOURCE, /\.dsc-expand-backdrop \{[\s\S]*?position: fixed;[\s\S]*?inset: 0;[\s\S]*?backdrop-filter: blur\(8px\)/u)
+    assert.match(CLIENT_SOURCE, /\.dsc-expand-body \{[\s\S]*?overflow: auto;[\s\S]*?overscroll-behavior: contain;/u)
+    // 4) 关闭路径：Esc 捕获监听、点遮罩关闭、焦点回到「展开全部」按钮。
+    assert.match(CLIENT_SOURCE, /function OutputModal[\s\S]*?event\.key !== 'Escape' \|\| event\.isComposing === true/u)
+    assert.match(CLIENT_SOURCE, /function OutputModal[\s\S]*?event\.target === event\.currentTarget/u)
+    assert.match(CLIENT_SOURCE, /expandButtonRef\.current/u)
+    // 5) 模态仍 portal 到 document.body（卡片祖先可能成为固定包含块）。
+    assert.match(CLIENT_SOURCE, /createPortal\(modal, document\.body\)/u)
+  })
+
 })
 
 describe('Host 源码锁定（非行为验证）', () => {
@@ -983,6 +1019,7 @@ describe('Client bundle 装配（vm 加载，不做真实渲染）', () => {
     const slotInjects = []
     const decorations = []
     const effects = []
+    const userTextRules = []
     const effect = (fn, label) => {
       effects.push(label)
       const disposer = fn()
@@ -1014,10 +1051,18 @@ describe('Client bundle 装配（vm 加载，不做真实渲染）', () => {
               return () => {}
             },
           },
+          uiConversation: {
+            userText: {
+              register: (rule) => {
+                userTextRules.push(rule)
+                return () => {}
+              },
+            },
+          },
         })
       },
     }
-    return { ctx, slotSpecs, slotEntries, slotInjects, decorations, effects }
+    return { ctx, slotSpecs, slotEntries, slotInjects, decorations, effects, userTextRules }
   }
 
   it('R46 工厂导出与三槽装配在 react-dom 可用/缺失时都成立（0.2.2 降级路径）', () => {
@@ -1037,6 +1082,8 @@ describe('Client bundle 装配（vm 加载，不做真实渲染）', () => {
       assert.ok(state.slotInjects.includes('conversation.input.overlay'))
       assert.ok(state.decorations.some((spec) => spec.name === 'cmd' && spec.ui?.kind === 'action'))
       assert.ok(state.effects.includes('dsh-shell-cmd: card styles'))
+      assert.ok(state.userTextRules.some((rule) => rule.id === 'shell-cmd-card'))
+      assert.ok(specs.includes('conversation.user.text.node:shell-cmd-card'))
     }
   })
 
@@ -1066,5 +1113,54 @@ describe('Client bundle 装配（vm 加载，不做真实渲染）', () => {
     assert.equal(portal.portal, true)
     assert.equal(portal.target, document.body)
     assert.equal(portal.node.props.className, 'dsc-term-backdrop')
+  })
+
+  it('R49 /cmd 结果作为 user 消息，在气泡里渲染成终端卡片（UserText 规则）', () => {
+    // Host 契约：真实 composeModelText 产出标记 + 元数据，消息工厂用 user source。
+    const result = {
+      stdout: { text: 'Updating abc..def\nFast-forward\n README.md | 2 +-\n', truncated: false },
+      stderr: { text: '', truncated: false },
+      exitCode: 0,
+      timedOut: false,
+      aborted: false,
+      signal: null,
+      timeoutMs: 1000,
+    }
+    const text = composeModelText({ command: 'git pull', cwd: '/tmp/work', result })
+    assert.equal(text.startsWith(USER_MESSAGE_MARKER), true)
+    const metaIndex = text.lastIndexOf(USER_CARD_META)
+    assert.equal(metaIndex > 0, true)
+    const meta = JSON.parse(text.slice(metaIndex + USER_CARD_META.length))
+    assert.equal(meta.command, 'git pull')
+    assert.equal(text.slice(meta.bodyStart).startsWith('Updating abc..def'), true)
+    assert.deepEqual(createShellCommandCardMessage(text).source, { kind: 'user' })
+
+    // 客户端行为（vm 真实执行规则）：带标记的消息整段替换为卡片节点。
+    const { exports } = loadBundle()
+    const state = makeCtx()
+    exports.apply(state.ctx)
+    assert.equal(state.userTextRules.length, 1)
+    const rule = state.userTextRules[0]
+    assert.equal(rule.id, 'shell-cmd-card')
+    assert.equal(rule.order < 0, true)
+    const candidate = rule.match(text, 0)
+    assert.notEqual(candidate, undefined)
+    assert.deepEqual([candidate.start, candidate.end], [0, text.length])
+    assert.equal(candidate.data.command, 'git pull')
+    assert.equal(candidate.data.body.includes('Updating abc..def'), true)
+    assert.equal(rule.match('普通用户消息，没有标记', 0), undefined)
+    assert.equal(rule.match(text, 5), undefined)
+
+    // 槽位装配 + 气泡容器样式。
+    assert.equal(
+      state.slotSpecs.some((spec) => spec.name === 'conversation.user.text.node' && spec.key === 'shell-cmd-card'),
+      true,
+    )
+    assert.match(CLIENT_SOURCE, /function parseUserCommandText\(raw\)/u)
+    assert.match(CLIENT_SOURCE, /function ShellCmdUserCard\(props\)/u)
+    assert.match(CLIENT_SOURCE, /data-shell-cmd-message-card/u)
+    assert.match(CLIENT_SOURCE, /\[data-message-bubble\]:has\(\[data-shell-cmd-message-card\]\)/u)
+    // 新式 command 节点（recordInput:false → 无 args）不再重复出卡片。
+    assert.match(CLIENT_SOURCE, /node\.args === null \|\| node\.args === undefined/u)
   })
 })

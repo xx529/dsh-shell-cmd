@@ -22,7 +22,7 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 模型：当前工作区有 1 个已修改文件和 1 个未跟踪文件……
 ```
 
-- 命令卡片：等宽字体、`$` 提示符、状态胶囊（执行中 / 退出码 / 超时 / 取消）、可展开的长输出、复制按钮。
+- 命令卡片：`/cmd` 结果以**用户消息**形式出现（气泡即终端卡片，不再有独立的「收到执行请求」通知）；等宽字体、`$` 提示符、状态胶囊（执行中 / 退出码 / 超时 / 取消）、**固定高度可滚动**的输出区、复制按钮；长输出的「展开全部 N 行」会打开**背景模糊的大卡片模态**（更大尺寸、可滚动、`Esc` / 点遮罩关闭，见下文）。
 - 交互终端：裸 `/cmd` + Enter 直接打开模态（token 被消费、草稿自动清空，体验与 `/context` 一致），Enter 逐条执行、Ctrl+Enter 发送给模型（对话里保留一条终端卡片）、Esc / 点遮罩关闭（详见下文）。
 - 输入提示：输入框草稿进入 `/cmd` 模式时，下方出现「终端命令模式」提示条。
 - 模型输入：一条 user 消息，正文包含「用户手动执行了此命令」、命令原文、cwd、退出状态与 stdout/stderr。
@@ -69,6 +69,31 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 | 取消 | 命令执行绑定 UI 请求的取消信号；被取消时不向模型发送任何内容 |
 | 会话标题 | 执行前用命令命名当前会话（见下节） |
 | 权限 / 沙箱 | 默认以 `danger-full-access` 运行（等价终端，见「权限与运行环境」） |
+
+### 命令卡片（`/cmd <命令>`）
+
+`/cmd <命令>` 执行完后，结果不是一条「收到执行请求」的独立通知，而是一条**用户消息**（`source.kind='user'`）：
+Chat 把它投影成右侧用户气泡，插件通过 UserText 规则把气泡内容整体替换成终端卡片。模型看到的也是这条消息
+（正文首行是 `[[dsh-shell-cmd:message]]`，末尾一行是 `[[dsh-shell-cmd:card]]{"command":…,"bodyStart":…,"truncated":…}`
+机器可读元数据）。
+
+- 新式命令在 `ctx.commands.register({ recordInput:false })` 下不再把命令原文写进 `command/run.args`，
+  因此 `conversation.chat.commandview`（`key='cmd'`）不再为新命令重复渲染卡片；**历史会话里旧的 command 卡片仍照常显示**
+  （旧记录有 args），旧通知也保持原样、不做回溯修改。
+- 卡片结构：命令行 + 状态胶囊 + **有界滚动输出区** + 底部备注 / 「展开全部 N 行」/ 「复制命令与输出」。
+- **卡片状态即可滚动**：输出完整渲染（不再按前 10 行截断），输出区 `max-height: 320px; overflow: auto`，
+  滚到边界后不会把滚动链传给对话列表（`overscroll-behavior: contain`）；滚动区可聚焦（`tabIndex=0`），键盘也能翻页。
+- **「展开全部 N 行」= 弹出大卡片模态**：不再行内切换显隐。模态 `width: min(940px, 100%)`、
+  `max-height: min(86vh, 860px)`，输出区自身滚动；遮罩 `position: fixed; inset: 0; z-index: 240`，
+  背景 `var(--dsw-alias-bg-mask-1)` + `backdrop-filter: blur(8px) saturate(120%)`（含 `-webkit-` 前缀），
+  卡片圆角 14px、`--dsw-shadow-lv3` 阴影，带轻微淡入/上浮动画（`prefers-reduced-motion` 时关闭）。
+- 模态通过 `ReactDOM.createPortal` 渲染到 `document.body`：对话框祖先可能带 `transform` 成为
+  `position: fixed` 的包含块；`react-dom` 缺失时就地渲染退化（不抛错）。
+- 关闭方式：`Esc`（`document` 捕获阶段监听，输入法 composing 时忽略）、点击遮罩、右上角 `✕`、底部「关闭」；
+  卡片内点击不会误关。关闭后焦点回到「展开全部」按钮。
+- 模态里同样有命令行、状态胶囊、行数与截断备注、复制按钮；历史回放（刷新/重开会话）后的卡片也走同一套交互。
+- 用户气泡的宿主容器通过 `[data-message-bubble]:has([data-shell-cmd-message-card])` 退成透明容器，
+  卡片占满气泡内容区；外观只使用 `--dsw-alias-*` 主题令牌，明暗主题自动跟随。
 
 ### 交互终端模式（裸 `/cmd`）
 

@@ -23,6 +23,9 @@ import {
   composeCommandText,
   composeModelText,
   createShellCommandMessage,
+  createShellCommandCardMessage,
+  USER_MESSAGE_MARKER,
+  USER_CARD_META,
   titleFromCommand,
   isConversationStart,
   syncSessionTitle,
@@ -473,6 +476,28 @@ describe('composeModelText', () => {
     assert.equal(text.includes('characters omitted'), true)
     assert.equal(text.includes('[the output above was truncated for transport]'), true)
   })
+
+  it('首行带 user 消息标记，末尾带卡片元数据（bodyStart 精确指向输出正文）', () => {
+    const result = makeResult({ stdout: { text: 'hello world', truncated: false } })
+    const text = composeModelText({ command: 'git pull', cwd: '/tmp/work', result })
+
+    assert.equal(text.startsWith(`${USER_MESSAGE_MARKER}\n`), true)
+    const metaIndex = text.lastIndexOf(`${USER_CARD_META}`)
+    assert.equal(metaIndex > 0, true)
+    const meta = JSON.parse(text.slice(metaIndex + USER_CARD_META.length))
+    assert.equal(meta.command, 'git pull')
+    assert.equal(meta.truncated, false)
+    assert.equal(Number.isInteger(meta.bodyStart), true)
+    assert.equal(text.slice(meta.bodyStart, text.indexOf('\n' + USER_CARD_META)), 'hello world')
+  })
+
+  it('命令含换行时元数据仍无歧义，bodyStart 只指向输出正文', () => {
+    const result = makeResult({ stdout: { text: 'line one\nline two', truncated: false } })
+    const text = composeModelText({ command: 'printf "a\\nb"', cwd: '/tmp/work', result })
+    const meta = JSON.parse(text.slice(text.lastIndexOf(USER_CARD_META) + USER_CARD_META.length))
+    assert.equal(meta.command, 'printf "a\\nb"')
+    assert.equal(text.slice(meta.bodyStart).startsWith('line one\nline two'), true)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -487,6 +512,23 @@ describe('createShellCommandMessage', () => {
     assert.equal(message.id.length, 36) // UUID v4 字符串
     assert.deepEqual(message.content, [{ type: 'text', text: 'body text' }])
     assert.deepEqual(message.source, { kind: 'shell-command', command: 'echo hi' })
+  })
+})
+
+describe('createShellCommandCardMessage', () => {
+  it('按 user 消息结构构造、source.kind=user（Chat 渲染成用户气泡）', () => {
+    const message = createShellCommandCardMessage('[[dsh-shell-cmd:message]] ...')
+    assert.equal(message.role, 'user')
+    assert.equal(typeof message.id, 'string')
+    assert.equal(message.id.length, 36)
+    assert.deepEqual(message.content, [{ type: 'text', text: '[[dsh-shell-cmd:message]] ...' }])
+    assert.deepEqual(message.source, { kind: 'user' })
+  })
+
+  it('每次构造都有独立 id', () => {
+    const left = createShellCommandCardMessage('a')
+    const right = createShellCommandCardMessage('a')
+    assert.notEqual(left.id, right.id)
   })
 })
 
@@ -1162,6 +1204,8 @@ describe('apply', () => {
     assert.equal(typeof definition.input, 'object')
     assert.equal(typeof definition.input.hint, 'string')
     assert.equal(definition.input.hint.length > 0, true)
+    // 命令载荷由权威 user 消息持有，command/run 不再重复记录 args。
+    assert.equal(definition.recordInput, false)
     assert.equal(typeof definition.handler, 'function')
   })
 
@@ -1202,11 +1246,15 @@ describe('apply', () => {
     assert.equal(out.kind, 'success')
     assert.equal(h.resolveCalls[0].timeoutMs, 1234)
     assert.equal(out.text.includes('characters omitted'), true)
-    // 未注入 createMessage，使用默认工厂：消息仍应是一条 user 消息
+    // apply 注入卡片消息工厂：结果是伪装成用户提交的普通 user 消息（source.kind='user'），
+    // 正文带标记，浏览器半端把气泡渲染成终端卡片。
     assert.equal(h.followups.length, 1)
     assert.equal(h.followups[0].role, 'user')
-    assert.equal(h.followups[0].source.kind, 'shell-command')
-    assert.equal(h.followups[0].source.command, 'echo big')
+    assert.deepEqual(h.followups[0].source, { kind: 'user' })
+    const text = h.followups[0].content[0].text
+    assert.equal(text.startsWith(USER_MESSAGE_MARKER), true)
+    assert.equal(text.includes('$ echo big'), true)
+    assert.equal(text.includes(USER_CARD_META), true)
   })
 
   it('只注册 connection.fetch 的 /api 精确路由（不再注册 webServer 根路径），裸 /cmd 返回打开标记', async () => {

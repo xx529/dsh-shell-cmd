@@ -75,7 +75,10 @@ scripts/publish-install.sh --dry-run  # 只打印计划
    ```
    需要 schemastery 的能力一律不要引入；可调值用常量 + `apply(ctx, config)` 防御式读取。
 3. **模型输入只走 `agent.followup()`**。命令结果本身（`CommandResult.text`）是 UI/log-only 文本，不能另写 session 事件、不能 patch `system-prompt`/`agent/request`。
-4. **`CommandNode` 结构**（Client 侧消费）：
+   - `/cmd` 的 followup 消息**伪装成用户亲自提交的普通 user 消息**：`source.kind='user'`，正文首行 `USER_MESSAGE_MARKER=[[dsh-shell-cmd:message]]`、末尾一行 `USER_CARD_META=[[dsh-shell-cmd:card]]{command,bodyStart,truncated}`。Chat 因此把它投影成 `user` 节点（用户气泡），而不是「收到执行请求」这类非人工轮次触发通知。
+   - 命令注册带 `recordInput:false`：载荷已由这条权威 user 消息持有，`command/run.args` 不再重复记录；Client 的 commandview 看到 `args` 为空且结果成功/执行中时不渲染卡片（避免与气泡卡片重复）。历史记录仍有 args，旧卡片照常显示。
+   - Client 通过 `ctx.uiConversation.userText.register({ id:'shell-cmd-card', order:-1000, match })` 匹配标记并整段吃掉该消息，再用 `conversation.user.text.node`（key=`shell-cmd-card`）渲染回 `ShellCommandCard`；宿主气泡用 `[data-message-bubble]:has([data-shell-cmd-message-card])` 退成透明容器。两条标记行只服务 UI，模型也会读到（无害）。
+4. **`CommandNode` 结构**（Client 侧消费；新式 `/cmd` 的 `args` 为 `null`，表示载荷在 user 消息气泡里）：
    ```js
    { kind:'command', seq, time, commandId, name:'cmd'|null, args:string|null,
      outcome:null | { kind:'success'|'error', text?, sourceEventSeq? } }
@@ -109,7 +112,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 ## 5. 修改指南
 
 - 加/改 Host 行为 → `index.js`；纯文本组装放进现有 `compose*` 函数，保持可单测。
-- 卡片外观/交互 → `client.js` 的 `ShellCommandCard`；新文案同时加到 `en`/`zh` 两张字典和 `locale/*.json`（插件展示元数据）。
+- 卡片外观/交互 → `client.js` 的 `ShellCommandCard`（输出区常驻 320px 滚动）、`OutputModal`（「展开全部」大卡片模态：portal 到 `document.body`、遮罩 `blur(8px)`、`Esc`/点遮罩/`✕`/底部按钮关闭、关闭后焦点回到触发按钮）与 `ShellCmdUserCard`（user 气泡内的卡片，复用 `ShellCommandCard`；UserText 规则见 `parseUserCommandText` / `userCommandCardRule`）；新文案同时加到 `en`/`zh` 两张字典和 `locale/*.json`（插件展示元数据）。
 - 命令名、描述、输入提示 → `apply()` 里的 `ctx.commands.register`；改了命令名必须同步改 Client 的 `commandview` key（当前 `cmd`）。
 - 输出上限/超时 → `DEFAULT_*`/`STDOUT_MAX_BYTES`；改动后同步 README 的表格。
 - **不要**把 `/cmd` 改成模型可调用的工具（`ctx.tools.register`）：它是人类动作，默认不套沙箱（见第 4 节第 9 条）。
@@ -117,7 +120,7 @@ scripts/publish-install.sh --dry-run  # 只打印计划
 
 ## 6. 测试与验证
 
-- 提交前：`npm run check && npm test`（当前 168 例全绿；新增用例后以 `npm test` 实际统计为准）。
+- 提交前：`npm run check && npm test`（当前 177 例全绿；新增用例后以 `npm test` 实际统计为准）。
 - Host 新逻辑必须补 `tests/command.test.mjs` 或 `tests/terminal.test.mjs` 用例，使用伪 `ctx`/`agent`/`shell`/`Request`/`Response`，不得 spawn 真进程或联网。
 - 本地链接安装后重载 Host：`plugin_manager action=set_plugin target=include:shell-cmd enabled=false` → `true`（或重启 DSH）。**改 `client.js` 需要刷新页面**（没有 `pnpm run dev:web` 时不做 HMR 热替换），不要承诺自动更新。
 - 验证已注册：`cordis_inspect_query` Client `Slots.listSubTree` 下 root=`conversation.chat.commandview` 应出现 occupant `key=cmd, active=true`；root=`conversation.input.overlay` 应出现 occupant id=`shell-cmd-terminal`；root=`conversation.composer.dock` 应出现 id=`shell-cmd-hint`。

@@ -595,3 +595,51 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 - `npm run check && npm test`：**171/171 全绿**（含新增 R45–R47）。
 - 静态证据：DSH 0.2.2-rc.1 的 `dsh-client-ui-conversation/lib/client.js` 中 `composerSeat` 的 `will-change:transform`，以及其 README「fixed 浮层必须 portal 到 document body」的契约原文。
 - **未覆盖（需人工）**：刷新页面后在真实桌面端打开裸 `/cmd` —— 期望遮罩覆盖整个会话区、卡片居中、右侧栏展开时不遮挡/不压暗；Esc/点遮罩关闭与 Ctrl+Enter 发送路径保持原样（无新增卡片、无重复发送）。R45 只锁定源码结构；R46/R47 用 vm + React 桩验证装配与 portal 目标，但真实布局（几何重排、z-index、主题变量继承）仍需浏览器人工复验。
+
+## 12. 命令卡片：输出区常驻滚动 + 「展开全部」大卡片模态（0.3.15，2026-11-09）
+
+### 12.1 需求与实现
+
+| 需求 | 实现 |
+| --- | --- |
+| 卡片状态下输出即可滚动（不再只看前 10 行） | `ShellCommandCard` 删除 `lines.slice(0, 10)` 截断，完整输出渲染进 `.dsc-body`：`max-height:320px; overflow:auto; overscroll-behavior:contain`，`tabIndex=0` 支持键盘滚动 |
+| 「展开全部 N 行」改为弹出框 | 新增 `OutputModal`：`.dsc-expand-backdrop`（`position:fixed; inset:0; z-index:240`，`var(--dsw-alias-bg-mask-1)` + `backdrop-filter: blur(8px) saturate(120%)`）居中承载 `.dsc-expand-card`（`width:min(940px,100%)`、`max-height:min(86vh,860px)`），输出区 `.dsc-expand-body` 自身滚动 |
+| 关闭路径 | `Esc`（document 捕获，composing 忽略）/ 点遮罩 / 右上角 `✕` / 底部「关闭」；卡片内点击 `stopPropagation` 不误关；关闭后焦点回到触发按钮 |
+| 主题令牌 | 全部颜色走 `--dsw-alias-*`；淡入/上浮动画在 `prefers-reduced-motion` 下关闭 |
+| 降级 | `react-dom` 缺失时模态就地渲染（不抛错）；历史回放卡片走同一套交互 |
+
+### 12.2 验证
+
+- `npm run check && npm test`：**172/172 全绿**（新增 R48 源码锁定：常驻滚动 / 模态结构 / 模糊遮罩 / portal / Esc / 焦点回收；R31 版本同步 0.3.15）。
+- 桌面端真机实测（2026-11-09，dsh 0.2.2-rc.1，deepseek-flash）：`plugin_manager` 本地链接安装 0.3.15 到 desktop profile 后重载 `include:shell-cmd`，`include:client-hmr` 直接热替换了 Client 模块（未刷新页面）。在「git pull」历史会话的 336 行 `/cmd git pull` 卡片上复核：
+  1. 卡片状态下输出完整渲染、`max-height:320px` 滚动区出现滚动条，`展开全部 336 行` 已是 `aria-haspopup=dialog` 的弹出式按钮；
+  2. 点击后出现居中大卡片模态（`min(940px,100%)` × `min(86vh,860px)`），背景明显模糊，模态正文可用 PageDown 继续翻看后续行（滚动条存在）；
+  3. `Esc` 关闭后焦点回到「展开全部」按钮（可访问性树 `focused` 命中该按钮）；
+  4. 明暗主题沿用桌面端当前主题，无字面色值。
+- 安装方式说明：本次为验证把 desktop profile 的 `dsh-shell-cmd` 依赖改为 `link:/Users/lzx/Documents/GitHub/dsh-shell-cmd`；发布时 `scripts/publish-install.sh` 会重新用 GitHub tarball 覆盖。
+
+## 13. `/cmd` 结果改为「用户消息 + 气泡卡片」（0.3.16，2026-11-09）
+
+### 13.1 背景
+
+0.3.15 及以前，`/cmd` 的结果通过 `agent.followup()` 以 `source.kind='shell-command'` 注入；Chat 把非人工轮次触发渲染成独立的「收到执行请求」通知，同时 commands 服务的 `command/run`+`command/done` 又渲染一张 command 卡片 —— 同一动作会出现两张 UI。
+
+### 13.2 契约调研（dsh 0.2.2-rc.1）
+
+| 事实 | 证据 |
+| --- | --- |
+| `source.kind === 'user'` 的 `user/message` 投影为 `user` 节点（用户气泡）；其它 kind 若被 inbox 认领为唤醒消息则投影为 `turn-trigger`（「收到执行请求」通知） | `dsh-client-ui-chat/lib/client.js` `messageDefinition.start/buildViewNode`（`event.data.source.kind !== "user"` → context/turn-trigger） |
+| 用户气泡内容由 `conversation.user.text` Factory 渲染，业务可用 UserText 规则把带标记的整段文本替换为自定义节点 | `dsh-client-ui-conversation` README「已发送用户文本」；`ctx.uiConversation.userText.register(rule)` + `conversation.user.text.node`（keyed slot，参考 `dsh-message-quotes` 的 `quoteRule`） |
+| 命令定义支持 `recordInput:false`：载荷由命令自己的权威事件持有时，`command/run` 不重复记录 `args` | `dsh-commands` README 与 `lib/index.js`（`command.definition.recordInput === false ? {} : { args }`） |
+| 用户气泡 DOM 带 `data-message-bubble`，可用 `:has()` 把宿主气泡退成透明容器 | `dsh-client-ui-chat/lib/client.js` `UserContent`（`UserMessageBubble data-message-bubble`） |
+
+### 13.3 实现
+
+- Host `index.js`：`createShellCommandCardMessage()` 用 `source.kind='user'`；`composeModelText()` 首行加 `[[dsh-shell-cmd:message]]`、末尾加 `[[dsh-shell-cmd:card]]{"command","bodyStart","truncated"}`；命令注册 `recordInput:false`。
+- Client `client.js`：`userCommandCardRule`（order -1000，匹配首行标记并吃掉整段）+ `parseUserCommandText()`（按元数据切出命令/输出）+ `ShellCmdUserCard`（复用 `ShellCommandCard`）+ `conversation.user.text.node` 注册；`[data-message-bubble]:has([data-shell-cmd-message-card])` 透明化宿主气泡；commandview 对 `args == null` 且成功/执行中的新命令节点返回 null（旧记录仍有 args，卡片不变）。
+- 兼容：其他客户端/模型只多看到两行机器可读标记；终端模式（裸 `/cmd` + Ctrl+Enter）仍走旧的 `command/run`+`command/done` 卡片，不受影响。
+
+### 13.4 验证
+
+- `npm run check && npm test`：**177/177 全绿**（新增 R49：Host 标记/元数据/`bodyStart` + vm 内真实执行 UserText 规则；R46 补 user-text 装配断言；R31 版本同步 0.3.16；`command.test.mjs` 增加卡片消息工厂、`recordInput:false`、标记/元数据用例）。
+- **未完成真机验证**：`plugin_manager` 重载 `include:shell-cmd` 返回 `application: restart-required`（unmanaged-plugin），Host 侧 `index.js` 改动需要重启 DSH 桌面端才生效；本次未重启（用户正在运行其他会话的后台任务），因此新气泡卡片交互留待重启后人工复核。Client `client.js` 已由 client-hmr 热替换，但旧 Host 仍发送旧消息格式，当前界面保持 0.3.15 行为（旧卡片 + 通知），不会出现半新半旧。

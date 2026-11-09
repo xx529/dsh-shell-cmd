@@ -46,11 +46,13 @@ window.__ModuleLoader__.load({
       'output.empty': '(no output)',
       'output.showAll': 'Show all {n} lines',
       'output.showLess': 'Collapse',
+      'output.lines': '{n} lines',
       'output.truncated': 'output was truncated',
       'output.stderr': 'stderr included',
       'action.copy': 'Copy command and output',
       'action.copied': 'Copied',
       'action.copyFailed': 'Copy failed',
+      'action.close': 'Close',
       'card.label': 'Shell command',
       'hint.active': 'Shell command mode: the command runs first, then the command and its output are sent to the model.',
       'terminal.title': 'Interactive terminal',
@@ -89,11 +91,13 @@ window.__ModuleLoader__.load({
       'output.empty': '（无输出）',
       'output.showAll': '展开全部 {n} 行',
       'output.showLess': '收起',
+      'output.lines': '{n} 行',
       'output.truncated': '输出已截断',
       'output.stderr': '含 stderr',
       'action.copy': '复制命令与输出',
       'action.copied': '已复制',
       'action.copyFailed': '复制失败',
+      'action.close': '关闭',
       'card.label': '终端命令',
       'hint.active': '终端命令模式：先执行命令，再把命令与输出一起发给模型。',
       'terminal.title': '交互终端',
@@ -133,6 +137,28 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-layer-1);
   overflow: hidden;
   font-size: 12px;
+}
+/* 带标记的 /cmd 结果消息（user 气泡）里只有终端卡片：让宿主气泡退成透明容器。 */
+.dsc-user-card {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+[data-message-bubble]:has([data-shell-cmd-message-card]) {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+[data-message-bubble]:has([data-shell-cmd-message-card]) > * {
+  display: block;
+  width: 100%;
+  min-width: 0;
 }
 .dsc-head {
   display: flex;
@@ -191,17 +217,22 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-layer-2);
 }
 .dsc-body {
+  box-sizing: border-box;
   margin: 0;
   padding: 8px 10px;
   max-height: 320px;
   overflow: auto;
+  /* 滚到边界后不要继续把滚动链传给对话列表 */
+  overscroll-behavior: contain;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
   color: var(--dsw-alias-label-primary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  tab-size: 2;
 }
+.dsc-body:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
 .dsc-body-empty { color: var(--dsw-alias-label-secondary); }
 .dsc-foot {
   display: flex;
@@ -234,6 +265,75 @@ window.__ModuleLoader__.load({
 }
 .dsc-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .dsc-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+/* 「展开全部」：大卡片模态（背景模糊、可滚动、Esc / 点遮罩关闭）。 */
+.dsc-expand-backdrop {
+  box-sizing: border-box;
+  position: fixed;
+  inset: 0;
+  z-index: 240;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.45));
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+  backdrop-filter: blur(8px) saturate(120%);
+  animation: dsc-fade-in 140ms ease-out;
+}
+.dsc-expand-card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(940px, 100%);
+  max-height: min(86vh, 860px);
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  box-shadow: var(--dsw-shadow-lv3, 0 18px 48px #0007);
+  overflow: hidden;
+  font-size: 12.5px;
+  animation: dsc-pop-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dsc-expand-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+.dsc-expand-close { padding: 0 6px; }
+.dsc-expand-body {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+.dsc-expand-body:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+.dsc-expand-body-empty { color: var(--dsw-alias-label-secondary); }
+.dsc-expand-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+}
+@keyframes dsc-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dsc-pop-in { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .dsc-expand-backdrop, .dsc-expand-card { animation: none; }
+}
 .dsc-hint {
   display: inline-flex;
   align-items: center;
@@ -555,6 +655,79 @@ window.__ModuleLoader__.load({
       return { body: lines.join('\n'), ...state }
     }
 
+    /**
+     * `/cmd` 结果 user 消息的首行标记（与 Host 的 `USER_MESSAGE_MARKER` 一致）。
+     * 聊天里的 user 消息带这个标记时，把整个气泡渲染成终端卡片。
+     */
+    const USER_MESSAGE_MARKER = '[[dsh-shell-cmd:message]]'
+
+    /** 消息末尾的元数据前缀（与 Host 的 `USER_CARD_META` 一致）。 */
+    const USER_CARD_META = '[[dsh-shell-cmd:card]]'
+
+    /** UserText 规则 ID，同时也是 `conversation.user.text.node` 的 key。 */
+    const USER_CARD_RULE_ID = 'shell-cmd-card'
+
+    /**
+     * 解析带标记的 user 消息，取出卡片需要的命令与输出正文。
+     *
+     * 消息形态（Host `composeModelText` 生成，首行是标记）：
+     * ```text
+     * [[dsh-shell-cmd:message]]
+     *
+     * The user ran the following shell command…
+     * $ git pull
+     * cwd: /path
+     * exit: 0
+     *
+     * <输出正文 + 状态标记>
+     * [[dsh-shell-cmd:card]]{"command":"git pull","bodyStart":184,"truncated":false}
+     * ```
+     * 解析失败（例如旧版本消息 / 手工粘贴的标记）返回 `null`，规则不匹配，
+     * 气泡退回普通文本渲染，不会吞掉用户输入。
+     *
+     * @param {unknown} raw 消息正文
+     * @returns {{ command: string, body: string } | null}
+     */
+    function parseUserCommandText(raw) {
+      if (typeof raw !== 'string' || raw.length === 0) return null
+      if (!raw.startsWith(USER_MESSAGE_MARKER)) return null
+      const metaIndex = raw.lastIndexOf(`\n${USER_CARD_META}`)
+      if (metaIndex < 0) return null
+      let meta = null
+      try {
+        meta = JSON.parse(raw.slice(metaIndex + 1 + USER_CARD_META.length))
+      } catch {
+        return null
+      }
+      if (meta === null || typeof meta !== 'object') return null
+      const command = typeof meta.command === 'string' ? meta.command : ''
+      if (command.trim().length === 0) return null
+      const bodyStart = Number.isInteger(meta.bodyStart) ? meta.bodyStart : -1
+      if (bodyStart < 0 || bodyStart > metaIndex) return null
+      let body = raw.slice(bodyStart, metaIndex)
+      // 传输层的截断提示只对模型有意义；卡片用状态标记表达。
+      body = body.replace('\n\n[the output above was truncated for transport]', '')
+      if (meta.truncated === true) body = `${body.replace(/\s+$/u, '')}\n[output truncated for display]`
+      return { command, body }
+    }
+
+    /**
+     * UserText 规则：整条带标记的 user 消息替换为终端卡片节点。
+     *
+     * 从 `0` 开始匹配、吃掉整段文本；`order` 取负值以在同起点（trim 空白）时胜出。
+     * 只有 Host 生成的新式 `/cmd` 结果消息会命中，普通用户输入不受影响。
+     */
+    const userCommandCardRule = {
+      id: USER_CARD_RULE_ID,
+      order: -1000,
+      match(text, from) {
+        if (from !== 0) return undefined
+        const card = parseUserCommandText(text)
+        if (card === null) return undefined
+        return { id: USER_CARD_RULE_ID, start: 0, end: text.length, data: card }
+      },
+    }
+
     /** 终端小图标（纯装饰）。 */
     function TerminalGlyph() {
       return h(
@@ -578,6 +751,128 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「展开全部」大卡片模态：展示完整输出，可滚动，背景模糊。
+     *
+     * 与交互终端模态同款约束：
+     * - 背景 `position: fixed; inset: 0`，`backdrop-filter: blur(8px)` 模糊底层；
+     * - `Esc` / 点遮罩关闭，卡片内点击不误关；
+     * - portal 到 `document.body`（宿主 composer 是 fixed 包含块，见
+     *   `conversation.input.overlay` 相关注释）；`react-dom` 缺失时退回就地渲染。
+     *
+     * @param {{
+     *   tr: Function,
+     *   command: string,
+     *   body: string,
+     *   lineCount: number,
+     *   tone: string,
+     *   statusText: string,
+     *   running: boolean,
+     *   notes: string,
+     *   copyState: string,
+     *   onCopy: Function,
+     *   onClose: Function,
+     * }} props
+     */
+    function OutputModal(props) {
+      const { tr, command, body, lineCount, tone, statusText, running, notes, copyState, onCopy, onClose } = props
+      const closeRef = React.useRef(null)
+
+      // Esc 关闭：document 捕获阶段监听（与交互终端模态一致）。
+      React.useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape' || event.isComposing === true) return
+          event.preventDefault()
+          event.stopPropagation()
+          onClose()
+        }
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
+      }, [onClose])
+
+      // 打开后把焦点交给关闭按钮，键盘用户能立刻 Esc 退出。
+      React.useEffect(() => {
+        if (closeRef.current !== null && typeof closeRef.current.focus === 'function') closeRef.current.focus()
+      }, [])
+
+      const modal = h(
+        'div',
+        {
+          className: 'dsc-expand-backdrop',
+          'data-shell-cmd-expand': 'overlay',
+          onMouseDown: (event) => {
+            if (event.target === event.currentTarget) onClose()
+          },
+        },
+        h(
+          'div',
+          {
+            className: 'dsc-expand-card',
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': tr('card.label'),
+            onMouseDown: (event) => event.stopPropagation(),
+          },
+          h(
+            'div',
+            { className: 'dsc-expand-head' },
+            h('span', { className: 'dsc-glyph', title: tr('card.label') }, h(TerminalGlyph)),
+            h(
+              'div',
+              { className: 'dsc-cmd' },
+              h('span', { className: 'dsc-prompt' }, `${tr('card.label')}  $ `),
+              h('span', { className: 'dsc-cmd-text' }, command),
+            ),
+            h(
+              'span',
+              { className: 'dsc-pill', 'data-tone': tone },
+              running ? h('span', { className: 'dsc-dot', 'aria-hidden': 'true' }) : null,
+              statusText,
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsc-btn dsc-expand-close',
+                ref: closeRef,
+                onClick: onClose,
+                'aria-label': tr('action.close'),
+                title: tr('action.close'),
+              },
+              '\u2715',
+            ),
+          ),
+          h(
+            'pre',
+            {
+              className: body.length > 0 ? 'dsc-expand-body' : 'dsc-expand-body dsc-expand-body-empty',
+              tabIndex: 0,
+              'aria-label': tr('card.label'),
+            },
+            body.length > 0 ? body : tr('output.empty'),
+          ),
+          h(
+            'div',
+            { className: 'dsc-expand-foot' },
+            h('span', { className: 'dsc-note' }, [tr('output.lines', { n: lineCount }), notes].filter(Boolean).join(' · ')),
+            h(
+              'button',
+              { type: 'button', className: 'dsc-btn', onClick: onCopy, 'aria-label': tr('action.copy') },
+              copyState === 'copied'
+                ? tr('action.copied')
+                : copyState === 'failed'
+                  ? tr('action.copyFailed')
+                  : tr('action.copy'),
+            ),
+            h('button', { type: 'button', className: 'dsc-btn', onClick: onClose }, tr('action.close')),
+          ),
+        ),
+      )
+      return ReactDOM !== null && typeof ReactDOM.createPortal === 'function'
+        ? ReactDOM.createPortal(modal, document.body)
+        : modal
+    }
+
+    /**
      * `/cmd` 命令行渲染器。
      * @param {{ node: object }} props `CommandRowOwnerProps`
      */
@@ -590,8 +885,11 @@ window.__ModuleLoader__.load({
       const body = parsed.body.length > 0 ? parsed.body : ''
       const lines = body.length > 0 ? body.split('\n') : []
       const long = lines.length > 10 || body.length > 1200
-      const [expanded, setExpanded] = React.useState(false)
+      // 展开只是「更大的查看状态」，默认卡片自身就渲染完整输出并在 320px 滚动区内滚动，
+      // 「展开全部」按钮打开大卡片模态，不再是行内换显隐。
+      const [expandOpen, setExpandOpen] = React.useState(false)
       const [copyState, setCopyState] = React.useState('idle')
+      const expandButtonRef = React.useRef(null)
 
       // 裸 /cmd 的 CommandResult 只用来打开交互终端：**任何**这种结果都不渲染卡片
       // （否则按 Esc 关闭终端后，对话记录里会留下一条奇怪的 cmd 卡片）。
@@ -617,6 +915,9 @@ window.__ModuleLoader__.load({
         setTerminalOpen(props.sessionId, true)
       }, [opensTerminal, props.sessionId, node.seq, node.commandId])
       if (isTerminalResult) return null
+      // 新式 /cmd 用 `recordInput:false` 把载荷放进权威的 user 消息里（气泡渲染成卡片）。
+      // 成功/执行中的 command 节点不再重复渲染卡片；出错时没有 user 消息，保留兜底卡片。
+      if ((node.args === null || node.args === undefined) && (outcome === null || outcome.kind === 'success')) return null
 
       const t = typeof props.t === 'function' ? props.t : null
       const tr = (key, params) => {
@@ -661,8 +962,6 @@ window.__ModuleLoader__.load({
                 ? tr('status.aborted')
                 : tr('status.done')
 
-      const shown = long && !expanded ? lines.slice(0, 10).join('\n') : body
-
       const copy = () => {
         const payload = `$ ${command}\n${body}`
         const done = () => {
@@ -691,60 +990,121 @@ window.__ModuleLoader__.load({
       if (parsed.signal !== null) notes.push(`signal ${parsed.signal}`)
       if (parsed.truncated) notes.push(tr('output.truncated'))
 
+      const closeExpand = () => {
+        setExpandOpen(false)
+        // 关闭后把焦点还给触发按钮（portal 从 body 移除后卡片里的按钮仍在）。
+        if (expandButtonRef.current !== null && typeof expandButtonRef.current.focus === 'function') {
+          expandButtonRef.current.focus()
+        }
+      }
+
       return h(
-        'div',
-        { className: 'dsc-card', 'data-command': 'cmd' },
+        React.Fragment,
+        null,
         h(
           'div',
-          { className: 'dsc-head' },
-          h('span', { className: 'dsc-glyph', title: tr('card.label') }, h(TerminalGlyph)),
+          { className: 'dsc-card', 'data-command': 'cmd' },
           h(
             'div',
-            { className: 'dsc-cmd' },
-            h('span', { className: 'dsc-prompt' }, `${tr('card.label')}  $ `),
-            h('span', { className: 'dsc-cmd-text' }, command),
+            { className: 'dsc-head' },
+            h('span', { className: 'dsc-glyph', title: tr('card.label') }, h(TerminalGlyph)),
+            h(
+              'div',
+              { className: 'dsc-cmd' },
+              h('span', { className: 'dsc-prompt' }, `${tr('card.label')}  $ `),
+              h('span', { className: 'dsc-cmd-text' }, command),
+            ),
+            h(
+              'span',
+              { className: 'dsc-pill', 'data-tone': tone },
+              running ? h('span', { className: 'dsc-dot', 'aria-hidden': 'true' }) : null,
+              statusText,
+            ),
           ),
           h(
-            'span',
-            { className: 'dsc-pill', 'data-tone': tone },
-            running ? h('span', { className: 'dsc-dot', 'aria-hidden': 'true' }) : null,
-            statusText,
+            'div',
+            { className: 'dsc-body-wrap' },
+            // 完整输出始终渲染在固定高度的滚动区里：卡片状态下即可上下滚动查看。
+            h('pre', {
+              className: body.length > 0 ? 'dsc-body' : 'dsc-body dsc-body-empty',
+              tabIndex: 0,
+              'aria-label': tr('card.label'),
+            }, body.length > 0 ? body : tr('output.empty')),
           ),
-        ),
-        h(
-          'div',
-          { className: 'dsc-body-wrap' },
-          h('pre', {
-            className: body.length > 0 ? 'dsc-body' : 'dsc-body dsc-body-empty',
-            'aria-label': tr('card.label'),
-          }, body.length > 0 ? shown : tr('output.empty')),
-        ),
-        h(
-          'div',
-          { className: 'dsc-foot' },
-          h('span', { className: 'dsc-note' }, notes.join(' · ')),
-          long
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsc-btn',
-                  onClick: () => setExpanded((value) => !value),
-                  'aria-expanded': expanded,
-                },
-                expanded ? tr('output.showLess') : tr('output.showAll', { n: lines.length }),
-              )
-            : null,
           h(
-            'button',
-            { type: 'button', className: 'dsc-btn', onClick: copy, 'aria-label': tr('action.copy') },
-            copyState === 'copied'
-              ? tr('action.copied')
-              : copyState === 'failed'
-                ? tr('action.copyFailed')
-                : tr('action.copy'),
+            'div',
+            { className: 'dsc-foot' },
+            h('span', { className: 'dsc-note' }, notes.join(' · ')),
+            long
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsc-btn',
+                    ref: expandButtonRef,
+                    onClick: () => setExpandOpen(true),
+                    'aria-haspopup': 'dialog',
+                    'aria-expanded': expandOpen,
+                  },
+                  tr('output.showAll', { n: lines.length }),
+                )
+              : null,
+            h(
+              'button',
+              { type: 'button', className: 'dsc-btn', onClick: copy, 'aria-label': tr('action.copy') },
+              copyState === 'copied'
+                ? tr('action.copied')
+                : copyState === 'failed'
+                  ? tr('action.copyFailed')
+                  : tr('action.copy'),
+            ),
           ),
         ),
+        expandOpen
+          ? h(OutputModal, {
+              tr,
+              command,
+              body,
+              lineCount: lines.length,
+              tone,
+              statusText,
+              running,
+              notes: notes.join(' · '),
+              copyState,
+              onCopy: copy,
+              onClose: closeExpand,
+            })
+          : null,
+      )
+    }
+
+    /**
+     * 聊天里带标记的 `/cmd` 结果消息：把 user 气泡内容渲染成同一张终端卡片。
+     *
+     * 数据来自 UserText 规则解析出的 `node.data`（command + body）；这里复用
+     * `ShellCommandCard` 的完整卡片（滚动区 / 展开模态 / 复制 / 状态胶囊），
+     * 只是换成伪 `CommandNode` 输入。
+     *
+     * @param {{ node: { data?: { command?: string, body?: string } }, t?: Function }} props
+     */
+    function ShellCmdUserCard(props) {
+      const data = props.node !== null && typeof props.node === 'object' ? props.node.data : null
+      if (data === null || typeof data !== 'object') return null
+      const command = typeof data.command === 'string' ? data.command : ''
+      const body = typeof data.body === 'string' ? data.body : ''
+      const node = {
+        kind: 'command',
+        seq: 0,
+        time: Date.now(),
+        commandId: '',
+        name: 'cmd',
+        args: command,
+        outcome: { kind: 'success', text: body },
+      }
+      return h(
+        'div',
+        { className: 'dsc-user-card', 'data-shell-cmd-message-card': '' },
+        h(ShellCommandCard, { node, t: props.t }),
       )
     }
 
@@ -1388,6 +1748,28 @@ window.__ModuleLoader__.load({
           HintView,
         ),
       )
+
+      // 带标记的 `/cmd` 结果消息：注册 UserText 匹配规则 + 气泡内卡片渲染器。
+      // Host 把结果作为 source.kind='user' 的普通用户消息发来，首行带标记；
+      // 这里把整条消息替换成终端卡片，宿主气泡样式由 CSS 退成透明容器。
+      ctx.inject(['uiConversation'], (scope) => {
+        scope.effect(
+          () => scope.uiConversation.userText.register(userCommandCardRule),
+          'dsh-shell-cmd: user-text card rule',
+        )
+        const UserCardEntry = (props) => h(ShellCmdUserCard, translate === null ? props : { ...props, t: translate })
+        UserCardEntry.displayName = 'DshShellCmdUserCard'
+        ctx.slots.inject('conversation.user.text.node', () =>
+          ctx.slots.register(
+            {
+              name: 'conversation.user.text.node',
+              key: USER_CARD_RULE_ID,
+              priority: 100,
+            },
+            UserCardEntry,
+          ),
+        )
+      })
 
       // 裸 /cmd 打开交互终端：给 Host 命令 `cmd` 挂 bare 调用装饰（与 /context 同款）。
       // 触发时 commands 客户端会先消费掉 `/cmd` token（草稿清空、不提交消息），

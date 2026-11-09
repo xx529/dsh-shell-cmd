@@ -46,6 +46,21 @@ export const STDOUT_MAX_BYTES = 256 * 1024
 export const USAGE = 'Usage: /cmd <shell command>'
 
 /**
+ * `/cmd` 发给模型的 user 消息首行标记。
+ *
+ * 浏览器半端注册 UserText 规则匹配该标记，把整条 user 消息渲染成终端卡片；
+ * 模型也会读到这一行，但它只是机器可读标记，不影响对正文的理解。
+ */
+export const USER_MESSAGE_MARKER = '[[dsh-shell-cmd:message]]'
+
+/**
+ * 消息末尾的机器可读元数据前缀：`{"command":"…","bodyStart":N,"truncated":…}`。
+ * 浏览器半端靠它精确切出命令原文与输出正文，避免解析人类可读文本的歧义
+ * （命令本身可能包含换行）。模型同样会读到这一行；字段少、体积固定。
+ */
+export const USER_CARD_META = '[[dsh-shell-cmd:card]]'
+
+/**
  * 按字符上限截断文本，保留头尾并标明省略量。
  * @param {string} text 原始文本
  * @param {number} max 上限
@@ -126,6 +141,11 @@ export function composeCommandText(result, maxOutputChars = DEFAULT_MAX_OUTPUT_C
  * 模型只看到这条消息，因此正文必须自带上下文：是谁执行的、命令原文、
  * 工作目录、退出状态，以及完整（或截断后的）输出。
  *
+ * 正文同时是浏览器半端的渲染来源：首行是 {@link USER_MESSAGE_MARKER}，
+ * 末尾附一行 {@link USER_CARD_META} 元数据（命令原文 + 输出正文的起始偏移）。
+ * 浏览器半端读到标记后把整条消息渲染成终端卡片；其它客户端/模型只会多看到
+ * 两行机器可读标记。
+ *
  * @param {object} input
  * @param {string} input.command 用户输入的命令原文
  * @param {string} input.cwd 执行目录
@@ -143,18 +163,22 @@ export function composeModelText({ command, cwd, result, maxOutputChars = DEFAUL
       : result.signal !== null && result.signal !== undefined
         ? `signal ${result.signal}`
         : String(result.exitCode ?? 0)
-  const lines = [
+  // 输出正文从 head 之后开始；bodyStart 让浏览器半端精确切片。
+  const head = [
+    USER_MESSAGE_MARKER,
+    '',
     'The user ran the following shell command from the DSH composer (/cmd). Respond to the user based on the command and its output; the command was not run by you.',
     '',
     `$ ${command}`,
     `cwd: ${cwd}`,
     `exit: ${exit}`,
     '',
-    clipped.text,
-  ]
-  if (clipped.truncated) lines.push('', '[the output above was truncated for transport]')
-  if (markers.length > 0) lines.push('', ...markers)
-  return lines.join('\n')
+  ].join('\n')
+  let text = head + clipped.text
+  if (clipped.truncated) text += '\n\n[the output above was truncated for transport]'
+  if (markers.length > 0) text += `\n\n${markers.join('\n')}`
+  const meta = { command, bodyStart: head.length, truncated: clipped.truncated }
+  return `${text}\n${USER_CARD_META}${JSON.stringify(meta)}`
 }
 
 /**
@@ -169,6 +193,27 @@ export function createShellCommandMessage(text, command) {
     role: 'user',
     content: [{ type: 'text', text }],
     source: { kind: 'shell-command', command },
+  }
+}
+
+/**
+ * `/cmd` 的结果消息：伪装成**用户亲自提交**的普通 user 消息。
+ *
+ * 关键差异：
+ * - `source.kind = 'user'`：Chat 把它投影成用户气泡（`user` 节点），而不是
+ *   「收到执行请求」这类非人工轮次触发通知；
+ * - 正文首行带 {@link USER_MESSAGE_MARKER}、末尾带 {@link USER_CARD_META}：
+ *   浏览器半端据此把气泡内容渲染成终端卡片（见 client.js 的 UserText 规则）。
+ *
+ * @param {string} text `composeModelText()` 生成的正文
+ * @returns {{ id: string, role: 'user', content: Array<{ type: 'text', text: string }>, source: { kind: 'user' } }}
+ */
+export function createShellCommandCardMessage(text) {
+  return {
+    id: globalThis.crypto.randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
   }
 }
 
@@ -448,6 +493,9 @@ export function apply(ctx, config = {}) {
     ...(Number.isFinite(config?.maxOutputChars) ? { maxOutputChars: config.maxOutputChars } : {}),
     ...(config?.nameSession === false ? { nameSession: false } : {}),
     ...(config?.useSessionPolicy === true ? { useSessionPolicy: true } : {}),
+    // `/cmd` 的结果消息伪装成用户亲自提交的普通 user 消息（source.kind='user'），
+    // 正文带标记，浏览器半端把这条消息的气泡渲染成终端卡片（而不是独立通知）。
+    createMessage: createShellCommandCardMessage,
   }
 
   // 交互终端：状态与 RPC（浏览器半端通过 POST /api/cmd-terminal/rpc 驱动）。
@@ -494,6 +542,10 @@ export function apply(ctx, config = {}) {
     name: 'cmd',
     description: 'Run a shell command, or open an interactive terminal with Ctrl+Enter handoff',
     input: { hint: ' <shell command>（留空打开交互终端）' },
+    // 命令载荷已由权威的 user 消息（source.kind='user' + 标记）持有，
+    // command/run 不再记录 args，避免会话日志重复记录用户输入；
+    // 浏览器半端也因此能区分「旧卡片」与「新消息气泡」。
+    recordInput: false,
     handler: (invocation) => executeShellCommand(ctx, invocation, options),
   })
 }
