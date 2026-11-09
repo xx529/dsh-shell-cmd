@@ -706,7 +706,9 @@ window.__ModuleLoader__.load({
       if (bodyStart < 0 || bodyStart > metaIndex) return null
       let body = raw.slice(bodyStart, metaIndex)
       // 传输层的截断提示只对模型有意义；卡片用状态标记表达。
+      // `/cmd` 输出与交互终端 transcript 各有一种措辞。
       body = body.replace('\n\n[the output above was truncated for transport]', '')
+      body = body.replace('\n\n[the transcript above was truncated for transport]', '')
       if (meta.truncated === true) body = `${body.replace(/\s+$/u, '')}\n[output truncated for display]`
       return { command, body }
     }

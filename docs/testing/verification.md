@@ -643,3 +643,27 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 
 - `npm run check && npm test`：**177/177 全绿**（新增 R49：Host 标记/元数据/`bodyStart` + vm 内真实执行 UserText 规则；R46 补 user-text 装配断言；R31 版本同步 0.3.16；`command.test.mjs` 增加卡片消息工厂、`recordInput:false`、标记/元数据用例）。
 - **未完成真机验证**：`plugin_manager` 重载 `include:shell-cmd` 返回 `application: restart-required`（unmanaged-plugin），Host 侧 `index.js` 改动需要重启 DSH 桌面端才生效；本次未重启（用户正在运行其他会话的后台任务），因此新气泡卡片交互留待重启后人工复核。Client `client.js` 已由 client-hmr 热替换，但旧 Host 仍发送旧消息格式，当前界面保持 0.3.15 行为（旧卡片 + 通知），不会出现半新半旧。
+
+## 14. 交互终端 Ctrl+Enter 也改为 user 气泡卡片（0.3.17，2026-11-10）
+
+### 14.1 诊断（用户反馈「为什么还有『收到执行请求』」）
+
+会话日志证据（`session-0e2aa604-…`，00:36:52）显示这条 `/cmd` 来自**交互终端（裸 `/cmd` + Ctrl+Enter）**，不是 `/cmd <命令>`：
+
+- `command/run.data.commandId = "cmd-terminal-…"`、`args = "ls -a"`（terminal.js 自己追加的 log-only 记录）；
+- `command/done.data.text` 以 `$ ls -a` 开头的完整 transcript；
+- followup 的 `user/message.source.kind = "shell-command"`，正文是「The user ran these commands in an interactive terminal session…」。
+
+0.3.16 只迁移了 `/cmd <命令>` 路径，终端模态的 finish 仍沿用旧的「command 卡片 + shell-command 通知」，因此看起来像没生效。
+
+### 14.2 实现（0.3.17）
+
+- `terminal.js` 持有共享标记常量 `USER_MESSAGE_MARKER` / `USER_CARD_META`（`index.js` 再导出），新增 `composeTerminalCardText()`：标记 + 说明头 + cwd + transcript + 元数据（`command=第一条命令`、`bodyStart` 指向 transcript 起点、`truncated`）。
+- `finish` 改为 `agent.followup(createShellCommandCardMessage(modelText))`（`source.kind='user'`）；**成功路径不再追加** `command/run`+`command/done`。旧会话里的终端卡片（有 args）仍按 commandview 渲染。
+- `followup` 抛错时补一对 log-only 的 run + done(error) 作为错误卡片兜底（append 失败只吞、错误原样抛出、状态保留）；`close` 依旧不追加、不 followup。
+- Client `parseUserCommandText()` 同时剥离两种传输截断提示（`/cmd` 的 output / 终端的 transcript）；其余渲染路径复用 0.3.16 的 UserText 卡片规则。
+
+### 14.3 验证
+
+- `npm run check && npm test`：**174/174 全绿**（重写 `tests/terminal.test.mjs` 与回归 R36–R44：成功路径零 append、标记/元数据/bodyStart、followup 失败兜底、close 不追加、二次 finish、无 session.append；R31 版本同步 0.3.17）。
+- 真机验收仍需重启 DSH 后执行一次「裸 `/cmd` → 输命令 → Ctrl+Enter」：预期对话里只有一条用户气泡卡片（含 transcript），没有「收到执行请求」通知，也没有第二张 command 卡片。

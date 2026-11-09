@@ -22,6 +22,18 @@ export const OPEN_MARKER = '[[dsh-shell-cmd:terminal]]'
 /** 共享 `/api` 桥上的精确路由路径（客户端用相对 `api/cmd-terminal/rpc`）。 */
 export const TERMINAL_FETCH_PATH = '/api/cmd-terminal/rpc'
 
+/**
+ * `/cmd` 结果消息的首行标记（与 client.js 的 UserText 规则一致）。
+ * 消息带此标记时，浏览器半端把 user 气泡渲染成终端卡片。
+ */
+export const USER_MESSAGE_MARKER = '[[dsh-shell-cmd:message]]'
+
+/**
+ * 消息末尾的机器可读元数据前缀：`{"command","bodyStart","truncated"}`。
+ * 浏览器半端靠它精确切出命令原文与正文。
+ */
+export const USER_CARD_META = '[[dsh-shell-cmd:card]]'
+
 /** 滚动区上限：行数与字符数（超出丢最旧的行）。 */
 const MAX_LINES = 1200
 const MAX_CHARS = 96 * 1024
@@ -149,6 +161,25 @@ export function terminalTranscript(state) {
 }
 
 /**
+ * 交互终端 Ctrl+Enter 的模型正文，同时是浏览器半端的渲染来源。
+ *
+ * 与 `/cmd <命令>` 的 `composeModelText()` 同构：首行 {@link USER_MESSAGE_MARKER}，
+ * 末尾一行 {@link USER_CARD_META}（命令取第一条命令，`bodyStart` 指向 transcript）。
+ * 浏览器半端把这条 user 消息的气泡渲染成终端卡片，因此交互终端发送后
+ * 不再需要额外追加 log-only 的 command/run + command/done 卡片记录。
+ *
+ * @param {{ cwd: string, transcript: { text: string, truncated: boolean }, firstCommand: string }} input
+ * @returns {string}
+ */
+export function composeTerminalCardText({ cwd, transcript, firstCommand }) {
+  const head = [USER_MESSAGE_MARKER, '', MODEL_HEADER, '', `cwd: ${cwd}`, ''].join('\n')
+  let text = head + transcript.text
+  if (transcript.truncated) text += '\n\n[the transcript above was truncated for transport]'
+  const meta = { command: firstCommand, bodyStart: head.length, truncated: transcript.truncated }
+  return `${text}\n${USER_CARD_META}${JSON.stringify(meta)}`
+}
+
+/**
  * 追加一条 log-only 的命令生命周期事件（只给 UI 卡片用）。
  *
  * 形状与 commands 服务 `execute()` 的 `appendLifecycle` 完全一致：
@@ -182,12 +213,12 @@ function appendCommandLifecycle(agent, type, data) {
  * @param {{
  *   runShell: (ctx: any, agent: any, command: string, signal: any, timeoutMs: any, options: any) => Promise<{ result: any, cwd: string }>,
  *   syncSessionTitle: (ctx: any, agent: any, command: string) => boolean,
- *   createShellCommandMessage: (text: string, command: string) => any,
+ *   createShellCommandCardMessage: (text: string) => any,
  *   clipText: (text: string, max: number) => { text: string, truncated: boolean },
  * }} deps
  */
 export function createTerminalRegistry(ctx, deps) {
-  const { runShell, syncSessionTitle, createShellCommandMessage, clipText } = deps
+  const { runShell, syncSessionTitle, createShellCommandCardMessage, clipText } = deps
   /** @type {Map<string, ReturnType<typeof createState>>} */
   const states = new Map()
   /** 已请求打开、但浏览器半端尚未消费的会话（裸 /cmd 的宿主端信号；status 只 peek）。 */
@@ -359,32 +390,22 @@ export function createTerminalRegistry(ctx, deps) {
       const transcript = clipText(terminalTranscript(state), MAX_MODEL_CHARS)
       const firstCommand = state.commands.find((command) => command.trim().length > 0) ?? 'cmd'
       syncSessionTitle(ctx, agent, firstCommand)
-      // UI-only 的命令生命周期记录（log-only，不进入模型上下文）：
-      // 形状与 commands 服务的 execute() 完全一致（command/run → command/done），
-      // Chat 的 command Definition 会把它折叠成 name='cmd' 的 CommandNode，
-      // 浏览器半端的 commandview(key='cmd') 卡片因此保留一条「命令行 + transcript」。
-      // 模型输入仍然只走下面的 agent.followup()，这里只影响 UI/log 记录；
-      // 任何一步 append 失败都 best-effort 忽略，绝不阻断发送。
-      const commandId = `cmd-terminal-${globalThis.crypto.randomUUID()}`
-      const recorded = appendCommandLifecycle(agent, 'command/run', {
-        commandId,
-        name: 'cmd',
-        args: firstCommand,
-        source: { kind: 'user' },
-      })
-      const modelText = [
-        MODEL_HEADER,
-        '',
-        `cwd: ${state.cwd}`,
-        '',
-        transcript.text,
-        ...(transcript.truncated ? ['', '[the transcript above was truncated for transport]'] : []),
-      ].join('\n')
+      // 发送后不再追加 log-only 的 command/run + command/done：这条 user 消息本身
+      // 就是权威记录，浏览器半端会把它的气泡渲染成终端卡片（含完整 transcript）。
+      // 旧会话里已有的终端卡片（args 存在）仍按 commandview 正常渲染。
+      const modelText = composeTerminalCardText({ cwd: state.cwd, transcript, firstCommand })
       try {
-        agent.followup(createShellCommandMessage(modelText, firstCommand))
+        agent.followup(createShellCommandCardMessage(modelText))
       } catch (error) {
-        // followup 失败时补一条 error 结算（与 commands 服务的 settleThrown 同语义），
-        // 避免日志里留下永远「运行中」的卡片；抛出的错误本身原样向外。
+        // followup 失败时没有 user 消息，用一对 log-only 事件保留一张错误卡片作兜底
+        // （与 commands 服务的 settleThrown 同语义）；抛出的错误本身原样向外。
+        const commandId = `cmd-terminal-${globalThis.crypto.randomUUID()}`
+        const recorded = appendCommandLifecycle(agent, 'command/run', {
+          commandId,
+          name: 'cmd',
+          args: firstCommand,
+          source: { kind: 'user' },
+        })
         if (recorded) {
           appendCommandLifecycle(agent, 'command/done', {
             commandId,
@@ -393,14 +414,6 @@ export function createTerminalRegistry(ctx, deps) {
           })
         }
         throw error
-      }
-      if (recorded) {
-        // 只有 run 成功落日志时才补 done，避免孤儿 done 事件。
-        appendCommandLifecycle(agent, 'command/done', {
-          commandId,
-          kind: 'success',
-          text: transcript.text,
-        })
       }
       state.sent = true
       const result = snapshot(state)

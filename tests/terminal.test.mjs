@@ -12,10 +12,13 @@ import assert from 'node:assert/strict'
 
 import {
   OPEN_MARKER,
+  TERMINAL_FETCH_PATH,
+  USER_CARD_META,
+  USER_MESSAGE_MARKER,
+  composeTerminalCardText,
   terminalTranscript,
   createTerminalRegistry,
   createTerminalFetchRoute,
-  TERMINAL_FETCH_PATH,
 } from '../terminal.js'
 
 // ---------------------------------------------------------------------------
@@ -99,11 +102,11 @@ function makeHarness({
       calls.title.push(command)
       return true
     },
-    createShellCommandMessage: (text, command) => ({
+    createShellCommandCardMessage: (text) => ({
       id: 'fake-message',
       role: 'user',
       content: [{ type: 'text', text }],
-      source: { kind: 'shell-command', command },
+      source: { kind: 'user' },
     }),
     clipText: (text, max) =>
       text.length <= max ? { text, truncated: false } : { text: text.slice(0, max), truncated: true },
@@ -310,10 +313,10 @@ describe('createTerminalRegistry', () => {
     assert.equal(h.calls.title[0], 'echo one')
     assert.equal(h.calls.followup.length, 1)
     const message = h.calls.followup[0]
-    assert.equal(message.source.kind, 'shell-command')
-    assert.equal(message.source.command, 'echo one')
+    assert.deepEqual(message.source, { kind: 'user' })
     assert.equal(message.content[0].type, 'text')
     const text = message.content[0].text
+    assert.equal(text.startsWith(`${USER_MESSAGE_MARKER}\n`), true)
     assert.equal(text.includes('interactive terminal session'), true)
     assert.equal(text.includes('cwd: /tmp/work'), true)
     assert.equal(text.includes('$ echo one'), true)
@@ -495,8 +498,8 @@ describe('createTerminalRegistry', () => {
 // 发送后的命令卡片记录（log-only 的 command 生命周期事件）
 // ---------------------------------------------------------------------------
 
-describe('交互终端发送后的命令卡片记录（command/run + command/done）', () => {
-  it('finish 按 run → followup → done 的顺序追加同一 commandId 的事件', async () => {
+describe('交互终端发送后的用户消息卡片（UserText 标记）', () => {
+  it('finish 只 followup 一条带标记的 user 消息，不再追加 command 生命周期事件', async () => {
     const h = makeHarness({
       runResults: [makeRun({ stdout: 'one' }), makeRun({ stdout: 'two' })],
     })
@@ -505,77 +508,33 @@ describe('交互终端发送后的命令卡片记录（command/run + command/don
 
     const result = await h.registry.finish('s-1')
 
-    assert.deepEqual(
-      h.calls.append.map((entry) => entry.type),
-      ['command/run', 'command/done'],
-    )
-    const [run, done] = h.calls.append
-    assert.match(run.data.commandId, /^cmd-terminal-/u)
-    assert.equal(run.data.commandId, done.data.commandId)
-    assert.equal(run.data.name, 'cmd')
-    assert.equal(run.data.args, 'echo one')
-    assert.deepEqual(run.data.source, { kind: 'user' })
-    // done.text 就是已经过 clip 的 transcript（卡片正文）。
-    assert.deepEqual(done.data, {
-      commandId: run.data.commandId,
-      kind: 'success',
-      text: '$ echo one\none\n$ echo two\ntwo',
-    })
-    // command/run 必须早于 followup，command/done 必须晚于 followup。
-    assert.deepEqual(
-      h.calls.order.map((entry) => (entry.kind === 'append' ? entry.type : entry.kind)),
-      ['command/run', 'followup', 'command/done'],
-    )
-    assert.equal(result.sent, true)
-  })
-
-  it('卡片记录不改变模型输入：followup 仍恰好一次，文本里没有 commandId', async () => {
-    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
-    await h.registry.send('s-1', 'echo x')
-
-    await h.registry.finish('s-1')
-
+    assert.deepEqual(h.calls.append, [])
+    assert.deepEqual(h.calls.order, [{ kind: 'followup' }])
     assert.equal(h.calls.followup.length, 1)
     const message = h.calls.followup[0]
-    const commandId = h.calls.append[0].data.commandId
-    assert.equal(message.source.kind, 'shell-command')
-    assert.equal(message.source.command, 'echo x')
-    assert.equal(message.content[0].type, 'text')
-    assert.equal(message.content[0].text.includes(commandId), false)
-    assert.equal(message.content[0].text.includes('command/run'), false)
-  })
-
-  it('command/run 追加失败不阻断发送：followup 照常，且不补孤立 done', async () => {
-    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], failAppendOn: 'command/run' })
-    await h.registry.send('s-1', 'echo x')
-
-    const result = await h.registry.finish('s-1')
-
-    assert.deepEqual(
-      h.calls.append.map((entry) => entry.type),
-      ['command/run'],
-    )
-    assert.equal(h.calls.followup.length, 1)
+    assert.deepEqual(message.source, { kind: 'user' })
+    const text = message.content[0].text
+    assert.equal(text.startsWith(`${USER_MESSAGE_MARKER}\n`), true)
+    const metaIndex = text.lastIndexOf(`\n${USER_CARD_META}`)
+    assert.equal(metaIndex > 0, true)
+    const meta = JSON.parse(text.slice(metaIndex + 1 + USER_CARD_META.length))
+    assert.equal(meta.command, 'echo one')
+    assert.equal(meta.truncated, false)
+    assert.equal(text.slice(meta.bodyStart, metaIndex), '$ echo one\none\n$ echo two\ntwo')
     assert.equal(result.sent, true)
-    assert.equal(h.registry.has('s-1'), false)
   })
 
-  it('command/done 追加失败不影响 finish：仍 followup 并成功返回', async () => {
-    const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], failAppendOn: 'command/done' })
-    await h.registry.send('s-1', 'echo x')
-
-    const result = await h.registry.finish('s-1')
-
-    assert.deepEqual(
-      h.calls.append.map((entry) => entry.type),
-      ['command/run', 'command/done'],
-    )
-    assert.equal(h.calls.followup.length, 1)
-    assert.equal(result.sent, true)
-    assert.equal(h.registry.has('s-1'), false)
+  it('composeTerminalCardText 的 bodyStart / truncated 语义与 /cmd 一致', () => {
+    const transcript = { text: '$ echo x\nx', truncated: true }
+    const text = composeTerminalCardText({ cwd: '/tmp/work', transcript, firstCommand: 'echo x' })
+    const meta = JSON.parse(text.slice(text.lastIndexOf(USER_CARD_META) + USER_CARD_META.length))
+    assert.equal(meta.command, 'echo x')
+    assert.equal(meta.truncated, true)
+    assert.equal(meta.bodyStart, text.indexOf('$ echo x'))
+    assert.equal(text.includes('[the transcript above was truncated for transport]'), true)
   })
 
-  it('followup 抛错时补一条 kind=error 的 done，错误本身原样抛出', async () => {
+  it('followup 抛错时补一对 run + done(error) 兜底卡片，错误原样抛出', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], followupThrows: true })
     await h.registry.send('s-1', 'echo x')
 
@@ -585,25 +544,27 @@ describe('交互终端发送后的命令卡片记录（command/run + command/don
       h.calls.append.map((entry) => entry.type),
       ['command/run', 'command/done'],
     )
-    assert.equal(h.calls.append[1].data.kind, 'error')
-    assert.equal(h.calls.append[0].data.commandId, h.calls.append[1].data.commandId)
+    const [run, done] = h.calls.append
+    assert.match(run.data.commandId, /^cmd-terminal-/u)
+    assert.equal(run.data.commandId, done.data.commandId)
+    assert.equal(run.data.args, 'echo x')
+    assert.equal(done.data.kind, 'error')
     // 发送失败不清理会话状态（原有错误语义不变）。
     assert.equal(h.registry.has('s-1'), true)
   })
 
-  it('关闭终端 / Esc（close）绝不追加任何命令事件', async () => {
+  it('关闭终端 / Esc（close）绝不追加事件，也不 followup', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
     await h.registry.open('s-1')
     await h.registry.send('s-1', 'echo x')
 
     assert.equal(h.registry.close('s-1'), true)
-
     assert.deepEqual(h.calls.append, [])
     assert.equal(h.calls.followup.length, 0)
-    assert.equal(h.calls.order.length, 0)
+    assert.deepEqual(h.calls.order, [])
   })
 
-  it('finish 第二次（状态已删）不重复追加，而是返回 empty', async () => {
+  it('第二次 finish（状态已删）返回 empty，不重复发送或追加', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })] })
     await h.registry.send('s-1', 'echo x')
     await h.registry.finish('s-1')
@@ -623,7 +584,7 @@ describe('交互终端发送后的命令卡片记录（command/run + command/don
     assert.equal(h.calls.append.length, appended)
   })
 
-  it('会话没有 session.append 时 finish 仍成功（best-effort）', async () => {
+  it('会话没有 session.append 时 finish 仍成功', async () => {
     const h = makeHarness({ runResults: [makeRun({ stdout: 'x' })], session: false })
     await h.registry.send('s-1', 'echo x')
 

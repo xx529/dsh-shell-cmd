@@ -157,10 +157,11 @@ Chat 把它投影成右侧用户气泡，插件通过 UserText 规则把气泡�
 - 命令执行期间输入行保持可聚焦（readOnly，不用 disabled），结束后焦点自动回到输入行；输出区自动滚到底部；
 - 传输失败（Host 未连接、会话未就绪、超时等）会在模态内按**错误码本地化**展示，并提供**重试**按钮，
   不会再只丢一个 `Failed to fetch`；
-- **只有 Ctrl+Enter 才是「发送」**：transcript 经 `agent.followup()` 作为一条 `source.kind='shell-command'` 的消息交给模型；Chat 会给这类消息建 `context` 节点（默认不渲染成普通用户气泡，所以对话里不会重复出现大段 transcript）；
-  同时插件在会话日志里 best-effort 追加一对 log-only 的 `command/run` → `command/done`（形状与 `/cmd <命令>` 的命令生命周期一致），
-  对话里因此保留一条**终端卡片**：命令行 + 完整 transcript，刷新/重开会话后仍在，可展开、可复制；
-- 卡片只是 UI/log 记录，**不进模型上下文**；`Esc`/关闭只删除 Host 侧终端状态，不产生任何模型消息，也不产生卡片；
+- **只有 Ctrl+Enter 才是「发送」**：transcript 经 `agent.followup()` 作为一条 **`source.kind='user'` 的用户消息**交给模型，
+  正文带 `[[dsh-shell-cmd:message]]` 标记与 `[[dsh-shell-cmd:card]]` 元数据（`bodyStart` 指向 transcript）；浏览器半端把这条消息的
+  气泡渲染成**终端卡片**（复用 `/cmd` 卡片：可滚动、展开全部模态、复制）——与 `/cmd <命令>` 完全一致，不再出现「收到执行请求」通知；
+  成功路径**不再**追加 log-only 的 command 生命周期事件；只有 `followup` 失败时才补一对 `command/run` → `command/done(error)` 作为错误卡片兜底；
+- 卡片就是权威的 user 消息（模型也会读到首尾两行机器可读标记）；`Esc`/关闭只删除 Host 侧终端状态，不产生任何模型消息，也不产生卡片；
 - `Ctrl+Enter` 后模型收到「用户在一个交互终端里执行了这些命令」的说明 + cwd + 完整 transcript；发送成功后终端模态立即关闭；
   这次发送如果发生在对话开头，同样会用第一条命令命名会话；
 - 面板按会话隔离；切换会话不会把当前面板带到别的会话（未发送的终端状态随会话保留，直到关闭/发送）。

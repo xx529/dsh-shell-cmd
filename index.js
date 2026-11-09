@@ -23,9 +23,14 @@
 import {
   OPEN_MARKER,
   TERMINAL_FETCH_PATH,
+  USER_CARD_META,
+  USER_MESSAGE_MARKER,
   createTerminalRegistry,
   createTerminalFetchRoute,
 } from './terminal.js'
+
+// 标记常量由 terminal.js 统一持有（`/cmd` 与交互终端共用同一套标记），这里再导出便于单测。
+export { USER_CARD_META, USER_MESSAGE_MARKER }
 
 /** Host 插件名（与包名一致，便于日志定位）。 */
 export const name = 'dsh-shell-cmd'
@@ -44,21 +49,6 @@ export const STDOUT_MAX_BYTES = 256 * 1024
 
 /** `/cmd` 的用法提示。 */
 export const USAGE = 'Usage: /cmd <shell command>'
-
-/**
- * `/cmd` 发给模型的 user 消息首行标记。
- *
- * 浏览器半端注册 UserText 规则匹配该标记，把整条 user 消息渲染成终端卡片；
- * 模型也会读到这一行，但它只是机器可读标记，不影响对正文的理解。
- */
-export const USER_MESSAGE_MARKER = '[[dsh-shell-cmd:message]]'
-
-/**
- * 消息末尾的机器可读元数据前缀：`{"command":"…","bodyStart":N,"truncated":…}`。
- * 浏览器半端靠它精确切出命令原文与输出正文，避免解析人类可读文本的歧义
- * （命令本身可能包含换行）。模型同样会读到这一行；字段少、体积固定。
- */
-export const USER_CARD_META = '[[dsh-shell-cmd:card]]'
 
 /**
  * 按字符上限截断文本，保留头尾并标明省略量。
@@ -502,7 +492,7 @@ export function apply(ctx, config = {}) {
   const registry = createTerminalRegistry(ctx, {
     runShell,
     syncSessionTitle,
-    createShellCommandMessage,
+    createShellCommandCardMessage,
     clipText,
   })
   options.terminalRegistry = registry
