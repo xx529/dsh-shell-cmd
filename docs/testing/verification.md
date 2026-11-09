@@ -667,3 +667,23 @@ npm run verify   # 应把新文件一并纳入 "tests/**/*.test.mjs"
 
 - `npm run check && npm test`：**174/174 全绿**（重写 `tests/terminal.test.mjs` 与回归 R36–R44：成功路径零 append、标记/元数据/bodyStart、followup 失败兜底、close 不追加、二次 finish、无 session.append；R31 版本同步 0.3.17）。
 - 真机验收仍需重启 DSH 后执行一次「裸 `/cmd` → 输命令 → Ctrl+Enter」：预期对话里只有一条用户气泡卡片（含 transcript），没有「收到执行请求」通知，也没有第二张 command 卡片。
+
+## 15. 气泡卡片铺满整行 + README 同步（0.3.18，2026-11-10）
+
+### 15.1 问题
+
+0.3.17 的 user 气泡卡片只有内容宽度（截图中约 295px）。原因：宿主 `userStack` 的样式是
+`max-width: min(calc(var(--dsh-chat-content-width,748px) * .702), 82%)` 且由右对齐列 fit-content 撑开，
+气泡自身的 `width:100%` 只相对这个收缩后的列生效。
+
+### 15.2 修复
+
+- 新增 CSS：`div:has(> [data-message-bubble]:has([data-shell-cmd-message-card])) { width:100%; max-width:100%; align-items:stretch }`
+  —— 只匹配「直接包裹卡片气泡」的父级（即 userStack），把列撑到 100% 并解除 max-width，卡片因此与旧 command 卡片一样铺满整行。
+- README 同步修正 0.3.16/0.3.17 之后过时的段落：模型输入（`source.kind='user'` + 标记/元数据）、架构图方式 A/B、关键契约、历史回放、模型看到的输入示意。
+- 回归锁：R49 增加整行宽度选择器断言；R31 版本 0.3.18。
+
+### 15.3 验证
+
+- `npm run check && npm test`：**174/174 全绿**。
+- 真机：重启 DSH 后发一条 `/cmd ls` 或交互终端 Ctrl+Enter，预期卡片与 command 卡片同宽（铺满会话正文列），气泡背景仍透明。

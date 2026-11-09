@@ -160,6 +160,17 @@ window.__ModuleLoader__.load({
   width: 100%;
   min-width: 0;
 }
+/*
+ * 宿主把用户消息放在右对齐的 fit-content 列里（userStack 有 82% / 0.702 倍内容宽度的
+ * max-width）。卡片需要像 command 卡片那样铺满整行：把承载气泡的父级撑到 100%，
+ * 并解除 max-width 限制；只匹配「直接包裹卡片气泡」的父级，不影响普通消息。
+ */
+div:has(> [data-message-bubble]:has([data-shell-cmd-message-card])) {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  align-items: stretch;
+}
 .dsc-head {
   display: flex;
   align-items: flex-start;

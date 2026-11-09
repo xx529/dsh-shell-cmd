@@ -846,8 +846,8 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /readOnly: busy \|\| sent/u)
   })
 
-  it('R31 package.json：版本 0.3.17 且声明 commandUi 客户端依赖', () => {
-    assert.equal(PACKAGE_JSON.version, '0.3.17')
+  it('R31 package.json：版本 0.3.18 且声明 commandUi 客户端依赖', () => {
+    assert.equal(PACKAGE_JSON.version, '0.3.18')
     const inject = PACKAGE_JSON?.dsh?.client?.inject
     assert.equal(Array.isArray(inject), true)
     assert.ok(inject.includes('@deepseek-ai/dsh-client-ui-commands'), '必须声明 @deepseek-ai/dsh-client-ui-commands')
@@ -1136,6 +1136,8 @@ describe('Client bundle 装配（vm 加载，不做真实渲染）', () => {
     assert.match(CLIENT_SOURCE, /function ShellCmdUserCard\(props\)/u)
     assert.match(CLIENT_SOURCE, /data-shell-cmd-message-card/u)
     assert.match(CLIENT_SOURCE, /\[data-message-bubble\]:has\(\[data-shell-cmd-message-card\]\)/u)
+    // 气泡父级撑满整行（宿主 userStack 默认是 82% / 0.702 倍内容宽的 fit-content 列）。
+    assert.match(CLIENT_SOURCE, /div:has\(> \[data-message-bubble\]:has\(\[data-shell-cmd-message-card\]\)\)/u)
     // 新式 command 节点（recordInput:false → 无 args）不再重复出卡片。
     assert.match(CLIENT_SOURCE, /node\.args === null \|\| node\.args === undefined/u)
   })

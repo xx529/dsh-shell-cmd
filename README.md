@@ -25,9 +25,9 @@ DeepSeek Harness（dsh）插件，提供两种终端输入方式：
 - 命令卡片：`/cmd` 结果以**用户消息**形式出现（气泡即终端卡片，不再有独立的「收到执行请求」通知）；等宽字体、`$` 提示符、状态胶囊（执行中 / 退出码 / 超时 / 取消）、**固定高度可滚动**的输出区、复制按钮；长输出的「展开全部 N 行」会打开**背景模糊的大卡片模态**（更大尺寸、可滚动、`Esc` / 点遮罩关闭，见下文）。
 - 交互终端：裸 `/cmd` + Enter 直接打开模态（token 被消费、草稿自动清空，体验与 `/context` 一致），Enter 逐条执行、Ctrl+Enter 发送给模型（对话里保留一条终端卡片）、Esc / 点遮罩关闭（详见下文）。
 - 输入提示：输入框草稿进入 `/cmd` 模式时，下方出现「终端命令模式」提示条。
-- 模型输入：一条 user 消息，正文包含「用户手动执行了此命令」、命令原文、cwd、退出状态与 stdout/stderr。
+- 模型输入：一条 **`source.kind='user'` 的 user 消息**，正文首行 `[[dsh-shell-cmd:message]]`、末尾 `[[dsh-shell-cmd:card]]{…}` 元数据，中间是说明头 + 命令 + cwd + 退出状态 + stdout/stderr；交互终端 Ctrl+Enter 则是说明头 + cwd + 完整 transcript。
 - 会话标题：**仅当 `/cmd` 是对话第一个动作时**，用命令本身命名会话（见「会话标题规则」）。
-- 历史回放：卡片从 `command/run` + `command/done` 折叠出的 `CommandNode` 重建，重开会话/刷新后仍在。
+- 历史回放：新式卡片就是持久化的 user 消息（刷新/重开会话后按 UserText 规则重建）；更早版本的 `command/run` + `command/done` 折叠出的 `CommandNode` 卡片仍照常回放。
 
 ## 截图
 
@@ -93,7 +93,9 @@ Chat 把它投影成右侧用户气泡，插件通过 UserText 规则把气泡�
   卡片内点击不会误关。关闭后焦点回到「展开全部」按钮。
 - 模态里同样有命令行、状态胶囊、行数与截断备注、复制按钮；历史回放（刷新/重开会话）后的卡片也走同一套交互。
 - 用户气泡的宿主容器通过 `[data-message-bubble]:has([data-shell-cmd-message-card])` 退成透明容器，
-  卡片占满气泡内容区；外观只使用 `--dsw-alias-*` 主题令牌，明暗主题自动跟随。
+  父级 `userStack` 通过 `div:has(> [data-message-bubble]:has([data-shell-cmd-message-card]))` 撑到 100% 宽
+  （取消宿主 82% / 0.702 倍内容宽度的限制），因此卡片像以前的 command 卡片一样**铺满整行**；
+  外观只使用 `--dsw-alias-*` 主题令牌，明暗主题自动跟随。
 
 ### 交互终端模式（裸 `/cmd`）
 
@@ -293,13 +295,14 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
 [Host] commands 服务解析并调用 handler
         │  0. （对话开头才）ctx.sessionTitle.rename(session, 命令)
         │  1. ctx.shell.resolve / execute（cwd=会话工作目录，前台等待，带超时与取消）
-        │  2. 组装正文：stdout + [stderr] + 状态标记
-        │  3. agent.followup(user 消息：命令 + cwd + exit + 输出) ← 模型据此回复
+        │  2. 组装正文：标记 + 元数据 + 说明头 + 命令 + cwd + exit + stdout/stderr
+        │  3. agent.followup(source.kind='user' 的 user 消息) ← 模型据此回复
         ▼
-[会话日志] session/title + command/run + command/done（均 log-only，不进模型历史）
+[会话日志] session/title + 一条持久化 user/message（命令载荷，recordInput:false 不再写 command/run.args）
         │
         ▼
-[Client] conversation.chat.commandview，key = "cmd"  →  终端卡片
+[Client] UserText 规则识别标记 → 用户气泡内渲染终端卡片（ShellCommandCard 复用）
+         commandview(key="cmd") 只服务历史旧记录与失败兜底，不再为新命令重复渲染
 
 方式 B：裸 /cmd（交互终端）
 裸 /cmd + Enter
@@ -310,7 +313,7 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
         │  Ctrl+C → { method:"cancel" }；Esc/关闭 → { method:"close" }
         │  Ctrl+Enter → { method:"finish" }
         ▼
-[Host terminal.js] 读滚动区 → agent.followup(transcript) → 终端状态删除
+[Host terminal.js] 读滚动区 → composeTerminalCardText() → agent.followup(user 消息卡片) → 终端状态删除
 
 兜底触发：旧 Host 的 OPEN_MARKER（commandview 按 commandId/seq 去重）/ status 轮询 pendingOpen
 ```
@@ -320,7 +323,7 @@ macOS Desktop 下脚本会自动使用 App 内置的 runtime pnpm（与插件管
 - Host 半端导出 `{ name, inject, apply }`，`inject = ['commands', 'shell', 'workingDirectory']`；缺失任一服务时插件保持 inactive 而不是抛错。`sessionTitle` / `webServer` / `connection` / `agents` 均为可选服务（`ctx.get`），缺失时只降级对应能力。
 - **不静态 import 任何 `@deepseek-ai/*` 核心包**：本地链接安装的插件在工作区内无法解析 dsh 安装内的包。UserMessage 按 `createUserMessage()` 的等价结构就地构造（`id` / `role` / `content` / `source`）。
 - Client 半端是 `window.__ModuleLoader__` 的懒工厂 classic script，只能 `require('react')`，无 JSX；样式经 `<style data-plugin-css>` 注入并在 `ctx.effect` 中清理。
-- 卡片注册在 `conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点），不替换任何内置渲染器；交互终端模态注册在 `conversation.input.overlay`（`id='shell-cmd-terminal'`，session 作用域），提示条仍在 `conversation.composer.dock`。
+- 卡片有两条渲染路径：`/cmd` 与交互终端的结果都是带标记的 user 消息，Client 通过 `ctx.uiConversation.userText.register()` + `conversation.user.text.node`（key=`shell-cmd-card`）把气泡内容渲染成 `ShellCommandCard`；`conversation.chat.commandview`（按命令名键控、`replaceRisk: none` 的公开扩展点）只服务历史旧记录与 followup 失败兜底。交互终端模态注册在 `conversation.input.overlay`（`id='shell-cmd-terminal'`，session 作用域），提示条仍在 `conversation.composer.dock`。
 - 裸 `/cmd` 的打开走 `ctx.commandUi.decorate({ name:'cmd', ui:{ kind:'action', run } })`：`/context` 同款路径，token 被消费后才执行 action；装饰只对 bare 调用生效，`/cmd <args>` 仍由 Host 命令执行。
 - 终端 RPC 由 Host 通过 `ctx.connection.fetch.register({ path:'/api/cmd-terminal/rpc', methods:['POST'], requestBody:'buffered' })` 暴露；浏览器半端用**页面相对地址** `fetch('api/cmd-terminal/rpc', { credentials:'same-origin', cache:'no-store' })` 调用，绝不拼 `__DSH_TRANSPORT__.streamBaseUrl` / `document.baseURI` 绝对地址（那会跨源 → `Failed to fetch`）。
 - 所有颜色走 `--dsw-alias-*` 主题令牌，明暗主题与主题切换自动跟随。
@@ -339,7 +342,22 @@ exit: 0
 ?? tests/new.test.ts
 ```
 
-消息 `source.kind = "shell-command"`。UI 上它表现为一条**默认折叠**的“Execution requested”turn-trigger 通知，正文只在用户主动展开时显示——可见的输入表达始终是上方的终端卡片。
+消息 `source.kind = "user"`，首尾两行是机器可读标记/元数据（`bodyStart` 指向输出正文起点）：
+
+```text
+[[dsh-shell-cmd:message]]
+
+The user ran the following shell command from the DSH composer (/cmd). …
+$ git status --short
+cwd: /Users/me/project
+exit: 0
+
+ M src/App.tsx
+?? tests/new.test.ts
+[[dsh-shell-cmd:card]]{"command":"git status --short","bodyStart":151,"truncated":false}
+```
+
+UI 上它就是一条**用户气泡**，气泡内容被 UserText 规则整体替换成终端卡片（铺满消息行），不再出现「收到执行请求」通知，也没有第二张 command 卡片。交互终端的 Ctrl+Enter 同一套格式（元数据 `command` 取第一条命令，正文为 transcript）。
 
 ## 可调常量与行配置
 
