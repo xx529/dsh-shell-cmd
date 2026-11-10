@@ -489,6 +489,17 @@ div:has(> [data-message-bubble]:has([data-shell-cmd-message-card])) {
   padding: 2px 0;
 }
 .dsc-term-input[readonly] { color: var(--dsw-alias-label-secondary); }
+/* 交互终端是终端式输入行，只保留光标，不要浏览器/主题画的焦点环。
+   外部 web 主题（如 dsh-markdown-xyy 的用户主题）会用
+   :where(input:focus-visible){ outline: 2px solid accent !important }
+   给全站输入框加环；普通 outline:none 压不住 !important，这里用更高的
+   类+伪类特异性 + !important 显式退出。 */
+.dsc-term-input:focus,
+.dsc-term-input:focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
+  box-shadow: none;
+}
 .dsc-term-hint {
   padding: 0 12px 8px;
   color: var(--dsw-alias-label-secondary);

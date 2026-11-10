@@ -846,8 +846,8 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.match(CLIENT_SOURCE, /readOnly: busy \|\| sent/u)
   })
 
-  it('R31 package.json：版本 0.3.18 且声明 commandUi 客户端依赖', () => {
-    assert.equal(PACKAGE_JSON.version, '0.3.18')
+  it('R31 package.json：版本 0.3.19 且声明 commandUi 客户端依赖', () => {
+    assert.equal(PACKAGE_JSON.version, '0.3.19')
     const inject = PACKAGE_JSON?.dsh?.client?.inject
     assert.equal(Array.isArray(inject), true)
     assert.ok(inject.includes('@deepseek-ai/dsh-client-ui-commands'), '必须声明 @deepseek-ai/dsh-client-ui-commands')
@@ -855,6 +855,15 @@ describe('client.js · 源码锁定（非行为验证）', () => {
     assert.ok(inject.includes('@deepseek-ai/dsh-client-locale'))
     assert.ok(PACKAGE_JSON.files.includes('client.js'))
     assert.ok(PACKAGE_JSON.files.includes('terminal.js'))
+  })
+
+  it('R49 终端输入行显式屏蔽外部主题的 !important 焦点环', () => {
+    // 外部 web 主题（如 dsh-markdown-xyy 的用户主题）会给全站 input 加
+    // :where(input:focus-visible){ outline: 2px solid accent !important }，
+    // 普通 outline:none 压不住 !important，必须用类+伪类特异性 + !important 退出。
+    assert.match(CLIENT_SOURCE, /\.dsc-term-input:focus,\s*\.dsc-term-input:focus-visible \{/u)
+    assert.match(CLIENT_SOURCE, /\.dsc-term-input:focus-visible \{[\s\S]*?outline: none !important;/u)
+    assert.match(CLIENT_SOURCE, /\.dsc-term-input:focus-visible \{[\s\S]*?outline-offset: 0 !important;/u)
   })
 
   it('R48 卡片输出常驻滚动 + 「展开全部」打开大卡片模态（模糊背景 / 可滚动 / Esc）', () => {
